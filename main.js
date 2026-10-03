@@ -41,7 +41,25 @@ function writeJson(file, data) {
 }
 
 const config = readJson(userDataFile('config.json'), {});
-const NOTES_DIR = path.resolve(config.notesDir || DEFAULT_NOTES_DIR);
+const DEFAULT_SETTINGS = {
+  hotkey: HOTKEY,
+  theme: 'system', // system | dark | light
+  fontSize: 15,
+  tabWidth: 4, // 中文场景：一格 = 4 空格 = 2 个中文字宽
+  livePreview: true,
+  lineNumbers: true,
+  indentDots: true,
+  alwaysOnTop: true,
+};
+const settings = {};
+for (const k of Object.keys(DEFAULT_SETTINGS)) {
+  settings[k] = config[k] !== undefined ? config[k] : DEFAULT_SETTINGS[k];
+}
+let NOTES_DIR = path.resolve(config.notesDir || DEFAULT_NOTES_DIR);
+
+function persistConfig() {
+  writeJson(userDataFile('config.json'), { ...settings, notesDir: NOTES_DIR });
+}
 
 const loadState = () => readJson(userDataFile('state.json'), {});
 const saveState = (s) => writeJson(userDataFile('state.json'), s);
@@ -158,7 +176,7 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-  win.setAlwaysOnTop(true, 'floating');
+  win.setAlwaysOnTop(settings.alwaysOnTop, 'floating');
   win.loadFile(
     path.join(__dirname, 'renderer', 'index.html'),
     IS_DIAG ? { search: 'diag=1' } : undefined
@@ -172,6 +190,7 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => {
     pageReady = true;
     sendTheme();
+    win.webContents.send('settings-changed', settings);
   });
   // 渲染层报错转发到主进程日志，便于排查
   win.webContents.on('console-message', (_e, level, message, _line, sourceId) => {
@@ -275,36 +294,43 @@ function createTray() {
     .createFromPath(path.join(__dirname, 'build', 'icon.png'))
     .resize({ width: 16 });
   tray = new Tray(icon);
-  tray.setToolTip('NoteAnywhere — Alt+Q 呼出灵感速记');
-
-  const menu = () =>
-    Menu.buildFromTemplate([
-      { label: '打开书写区（Alt+Q）', click: () => toggleWindow() },
-      { label: '新建一页', click: async () => { showOnly(); await newPage(); } },
-      { type: 'separator' },
-      {
-        label: '打开笔记文件夹',
-        click: () => { ensureNotesDir(); shell.openPath(NOTES_DIR); },
-      },
-      { type: 'separator' },
-      {
-        label: '开机自启',
-        type: 'checkbox',
-        checked: app.getLoginItemSettings().openAtLogin,
-        click: (mi) => app.setLoginItemSettings({ openAtLogin: mi.checked }),
-      },
-      { type: 'separator' },
-      {
-        label: '退出',
-        click: () => {
-          quitting = true;
-          Promise.resolve(flushEditor()).finally(() => app.quit());
-        },
-      },
-    ]);
-
-  tray.setContextMenu(menu());
+  tray.setToolTip('NoteAnywhere — 灵感速记');
+  tray.setContextMenu(buildTrayMenu());
   tray.on('click', () => toggleWindow());
+}
+
+function buildTrayMenu() {
+  return Menu.buildFromTemplate([
+    { label: '打开书写区（' + settings.hotkey + '）', click: () => toggleWindow() },
+    { label: '新建一页', click: async () => { showOnly(); await newPage(); } },
+    { type: 'separator' },
+    {
+      label: '打开笔记文件夹',
+      click: () => { ensureNotesDir(); shell.openPath(NOTES_DIR); },
+    },
+    {
+      label: '设置',
+      click: () => { showOnly(); win.webContents.send('open-settings'); },
+    },
+    { type: 'separator' },
+    {
+      label: '开机自启',
+      type: 'checkbox',
+      checked: app.getLoginItemSettings().openAtLogin,
+      click: (mi) => {
+        app.setLoginItemSettings({ openAtLogin: mi.checked });
+        tray.setContextMenu(buildTrayMenu());
+      },
+    },
+    { type: 'separator' },
+    {
+      label: '退出',
+      click: () => {
+        quitting = true;
+        Promise.resolve(flushEditor()).finally(() => app.quit());
+      },
+    },
+  ]);
 }
 
 // ---------- 生命周期 ----------
@@ -315,7 +341,8 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => toggleWindow());
 
   app.whenReady().then(async () => {
-    nativeTheme.themeSource = 'system';
+    nativeTheme.themeSource =
+      settings.theme === 'dark' ? 'dark' : settings.theme === 'light' ? 'light' : 'system';
     nativeTheme.on('updated', sendTheme);
     Menu.setApplicationMenu(null); // 去掉默认菜单，避免 Ctrl+N 等加速键被截获
 
@@ -330,11 +357,11 @@ if (!app.requestSingleInstanceLock()) {
       }
     }
 
-    const ok = globalShortcut.register(HOTKEY, toggleWindow);
+    const ok = globalShortcut.register(settings.hotkey, toggleWindow);
     if (!ok) {
       dialog.showErrorBox(
         '热键注册失败',
-        `${HOTKEY} 被其他程序占用了（如果旧版 NoteAnywhere 还在运行，请先从托盘退出它）。然后重启本应用。`
+        settings.hotkey + ' 被其他程序占用了（如果旧版 NoteAnywhere 还在运行，请先从托盘退出它）。可在设置中更换热键。'
       );
     }
 
@@ -403,7 +430,105 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
-// ---------- IPC ----------
+// ---------- 设置 ----------
+
+ipcMain.handle('get-settings', () => ({
+  ...settings,
+  notesDir: NOTES_DIR,
+  autostart: app.getLoginItemSettings().openAtLogin,
+  version: app.getVersion(),
+  userData: app.getPath('userData'),
+}));
+
+ipcMain.handle('set-setting', (_e, { key, value }) => {
+  switch (key) {
+    case 'hotkey': {
+      if (typeof value !== 'string' || !value.includes('+')) return { ok: false, error: '无效的热键' };
+      const prev = settings.hotkey;
+      try { globalShortcut.unregister(prev); } catch {}
+      let ok = false;
+      try { ok = globalShortcut.register(value, toggleWindow); } catch {}
+      if (!ok) {
+        try { globalShortcut.register(prev, toggleWindow); } catch {}
+        return { ok: false, error: '该组合键被其他程序占用' };
+      }
+      settings.hotkey = value;
+      persistConfig();
+      tray && tray.setContextMenu(buildTrayMenu());
+      win.webContents.send('settings-changed', settings);
+      return { ok: true };
+    }
+    case 'theme': {
+      if (!['system', 'dark', 'light'].includes(value)) return { ok: false };
+      settings.theme = value;
+      persistConfig();
+      nativeTheme.themeSource = value === 'system' ? 'system' : value;
+      return { ok: true };
+    }
+    case 'autostart': {
+      app.setLoginItemSettings({ openAtLogin: !!value });
+      tray && tray.setContextMenu(buildTrayMenu());
+      return { ok: true };
+    }
+    case 'alwaysOnTop': {
+      settings.alwaysOnTop = !!value;
+      persistConfig();
+      if (win) win.setAlwaysOnTop(settings.alwaysOnTop, 'floating');
+      return { ok: true };
+    }
+    case 'fontSize': {
+      if (![14, 15, 16, 17, 18].includes(value)) return { ok: false };
+      settings.fontSize = value;
+      persistConfig();
+      win.webContents.send('settings-changed', settings);
+      return { ok: true };
+    }
+    case 'tabWidth': {
+      if (![2, 4].includes(value)) return { ok: false };
+      settings.tabWidth = value;
+      persistConfig();
+      win.webContents.send('settings-changed', settings);
+      return { ok: true };
+    }
+    case 'livePreview':
+    case 'lineNumbers':
+    case 'indentDots': {
+      settings[key] = !!value;
+      persistConfig();
+      win.webContents.send('settings-changed', settings);
+      return { ok: true };
+    }
+    default:
+      return { ok: false };
+  }
+});
+
+ipcMain.handle('pick-notes-dir', async () => {
+  const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
+  if (r.canceled || !r.filePaths || !r.filePaths[0]) return { ok: false };
+  NOTES_DIR = path.resolve(r.filePaths[0]);
+  persistConfig();
+  ensureNotesDir();
+  return { ok: true, dir: NOTES_DIR };
+});
+
+ipcMain.handle('reset-window', () => {
+  const st = loadState();
+  delete st.bounds;
+  saveState(st);
+  if (win) win.center();
+  return { ok: true };
+});
+
+ipcMain.handle('open-path', (_e, p) => {
+  if (p === 'notes') {
+    ensureNotesDir();
+    shell.openPath(NOTES_DIR);
+  } else if (p === 'userData') {
+    shell.openPath(app.getPath('userData'));
+  }
+  return { ok: true };
+});
 
 ipcMain.handle('list-pages', () => listPages());
 ipcMain.on('save', (_e, { text, caret }) => writeCurrentPage(text, caret));

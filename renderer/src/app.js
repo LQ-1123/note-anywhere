@@ -7,7 +7,7 @@ import {
   Decoration,
   WidgetType,
 } from '@codemirror/view';
-import { EditorState } from '@codemirror/state';
+import { EditorState, Compartment } from '@codemirror/state';
 import {
   HighlightStyle,
   syntaxHighlighting,
@@ -29,6 +29,11 @@ const editorHost = document.getElementById('editor');
 let currentFile = null;
 let saveTimer = null;
 let listTimer = null;
+
+// ---------- 运行时可调设置（由主进程推送/更新） ----------
+const uiSettings = { fontSize: 15, tabWidth: 2, lineNumbers: true, indentDots: true };
+const indentComp = new Compartment();
+const previewComp = new Compartment();
 
 // ---------- 语法高亮（VSCode Dark+/Light+ 调性，颜色取自 CSS 变量） ----------
 
@@ -102,19 +107,20 @@ class LnWidget extends WidgetType {
   }
 }
 
-// 缩进圆点：一个 · 表示一个缩进格（2 空格），'· ' 宽度与两空格等宽保持对齐
+// 缩进圆点：一个 · 表示一个缩进格（Tab 宽度空格），宽度与缩进等宽保持对齐
 class DotsWidget extends WidgetType {
-  constructor(levels) {
+  constructor(levels, tabWidth) {
     super();
     this.levels = levels;
+    this.tabWidth = tabWidth;
   }
   eq(other) {
-    return other.levels === this.levels;
+    return other.levels === this.levels && other.tabWidth === this.tabWidth;
   }
   toDOM() {
     const s = document.createElement('span');
     s.className = 'cm-dot';
-    s.textContent = '· '.repeat(this.levels);
+    s.textContent = ('·' + ' '.repeat(this.tabWidth - 1)).repeat(this.levels);
     return s;
   }
 }
@@ -160,14 +166,18 @@ function addLangsToBareFences(text) {
   return lines.join('\n');
 }
 
-// 光标所在行保持源码显示，其余行隐藏标记呈现效果
-function buildPreviewDecos(view) {
+// 实时渲染拆成两部分：md 标记隐藏（设置可关）与代码卡片（常开）
+function lineInactive(st, head, pos) {
+  const line = st.doc.lineAt(pos);
+  return head < line.from || head > line.to;
+}
+
+function buildMdDecos(view) {
   const st = view.state;
   const head = st.selection.main.head;
   const inline = [];
   const lineDecos = [];
-  const BIG_DOC = 300000;
-  if (st.doc.length > BIG_DOC) return Decoration.none;
+  if (st.doc.length > 300000) return Decoration.none;
 
   syntaxTree(st).iterate({
     enter: (ref) => {
@@ -175,7 +185,16 @@ function buildPreviewDecos(view) {
       const from = ref.from;
       const to = ref.to;
 
-      // 块级行装饰
+      if (name === 'CodeBlock') {
+        // 缩进式代码块（4 空格起头）：按普通正文呈现，避免中文缩进触发“怪格式”
+        for (let pos = from; pos <= to; ) {
+          const line = st.doc.lineAt(pos);
+          lineDecos.push(Decoration.line({ class: 'cm-plain-line' }).range(line.from));
+          if (line.to >= to) break;
+          pos = line.to + 1;
+        }
+        return;
+      }
       if (name === 'Blockquote') {
         for (let pos = from; pos <= to; ) {
           const line = st.doc.lineAt(pos);
@@ -183,90 +202,35 @@ function buildPreviewDecos(view) {
           if (line.to >= to) break;
           pos = line.to + 1;
         }
-      }
-
-      // 代码块：VSCode 式卡片（顶/底行、边框、行号、当前行高亮）
-      if (name === 'FencedCode') {
-        const node = ref.node;
-        const first = node.firstChild;
-        const last = node.lastChild;
-        const hasOpen = !!(first && first.name === 'CodeMark');
-        const hasClose = !!(last && last !== first && last.name === 'CodeMark');
-        const infoNode = hasOpen && first.nextSibling ? first.nextSibling : null;
-        const hasLang = !!(infoNode && infoNode.name === 'CodeInfo');
-
-        const lines = [];
-        for (let pos = from; pos <= to; ) {
-          const line = st.doc.lineAt(pos);
-          lines.push(line);
-          if (line.to >= to) break;
-          pos = line.to + 1;
-        }
-
-        let n = 1;
-        lines.forEach((line, i) => {
-          const lineActive = head >= line.from && head <= line.to;
-          let cls = 'cm-code-line';
-          if (i === 0) cls += ' cm-code-top';
-          if (i === lines.length - 1) cls += ' cm-code-bottom';
-          if (lineActive) cls += ' cm-code-active';
-          lineDecos.push(Decoration.line({ class: cls }).range(line.from));
-          const isFenceLine = (hasOpen && i === 0) || (hasClose && i === lines.length - 1);
-          if (!isFenceLine) {
-            inline.push(Decoration.widget({ widget: new LnWidget(n++), side: -1 }).range(line.from));
-            // 非编辑行：前导缩进显示为圆点（每 2 空格一个 ·，保持列对齐）
-            if (!lineActive) {
-              const indent = (line.text.match(/^ */) || [''])[0].length;
-              const levels = Math.floor(indent / 2);
-              if (levels > 0) {
-                inline.push(
-                  Decoration.replace({ widget: new DotsWidget(levels) }).range(
-                    line.from,
-                    line.from + levels * 2
-                  )
-                );
-              }
-            }
-          } else if (i === 0 && !hasLang) {
-            // 无语言围栏：显示「纯文本」提示，说明为什么没有着色
-            inline.push(Decoration.widget({ widget: new PlainWidget(), side: 1 }).range(line.from));
-          }
-        });
-      }
-
-      // 语言徽标（``` 后面的 js / cpp 等）
-      if (name === 'CodeInfo') {
-        inline.push(Decoration.mark({ class: 'cm-lang' }).range(from, to));
         return;
       }
-
       if (name === 'HorizontalRule') {
-        const line = st.doc.lineAt(from);
-        if (!(head >= line.from && head <= line.to)) {
+        if (lineInactive(st, head, from)) {
           inline.push(Decoration.replace({ widget: new HrWidget() }).range(from, to));
         }
         return;
       }
       if (name === 'ListMark') {
-        const line = st.doc.lineAt(from);
-        if (!(head >= line.from && head <= line.to)) {
+        if (lineInactive(st, head, from)) {
           inline.push(Decoration.replace({ widget: new BulletWidget() }).range(from, to));
         }
         return;
       }
 
-      const line = st.doc.lineAt(from);
-      const lineActive = head >= line.from && head <= line.to;
       const hide = () => {
-        if (!lineActive) inline.push(Decoration.replace({}).range(from, to));
+        if (lineInactive(st, head, from)) inline.push(Decoration.replace({}).range(from, to));
       };
 
       if (
         name === 'HeaderMark' || name === 'EmphasisMark' || name === 'StrongEmphasisMark' ||
-        name === 'StrikethroughMark' || name === 'QuoteMark' || name === 'LinkMark' ||
-        name === 'CodeMark'
+        name === 'StrikethroughMark' || name === 'QuoteMark' || name === 'LinkMark'
       ) {
         hide();
+        return;
+      }
+      if (name === 'CodeMark') {
+        const parent = ref.node.parent; // 行内代码记号；围栏记号归代码卡片插件处理
+        if (parent && parent.name === 'InlineCode') hide();
         return;
       }
       if (name === 'URL') {
@@ -280,14 +244,107 @@ function buildPreviewDecos(view) {
   return Decoration.set(lineDecos.concat(inline), true);
 }
 
-const livePreview = ViewPlugin.fromClass(
+function buildCardDecos(view) {
+  const st = view.state;
+  const head = st.selection.main.head;
+  const inline = [];
+  const lineDecos = [];
+  if (st.doc.length > 300000) return Decoration.none;
+
+  syntaxTree(st).iterate({
+    enter: (ref) => {
+      if (ref.name !== 'FencedCode') return;
+      const node = ref.node;
+      const first = node.firstChild;
+      const last = node.lastChild;
+      const hasOpen = !!(first && first.name === 'CodeMark');
+      const hasClose = !!(last && last !== first && last.name === 'CodeMark');
+      const infoNode = hasOpen && first.nextSibling ? first.nextSibling : null;
+      const hasLang = !!(infoNode && infoNode.name === 'CodeInfo');
+
+      const lines = [];
+      for (let pos = ref.from; pos <= ref.to; ) {
+        const line = st.doc.lineAt(pos);
+        lines.push(line);
+        if (line.to >= ref.to) break;
+        pos = line.to + 1;
+      }
+
+      let n = 1;
+      lines.forEach((line, i) => {
+        const lineActive = head >= line.from && head <= line.to;
+        let cls = 'cm-code-line';
+        if (i === 0) cls += ' cm-code-top';
+        if (i === lines.length - 1) cls += ' cm-code-bottom';
+        if (lineActive) cls += ' cm-code-active';
+        lineDecos.push(Decoration.line({ class: cls }).range(line.from));
+
+        const isOpenFence = hasOpen && i === 0;
+        const isCloseFence = hasClose && i === lines.length - 1;
+        if (isOpenFence) {
+          // 开栏行：光标不在时隐藏 ``` 记号；语言显示徽标，无语言显示「纯文本」提示
+          if (!lineActive) {
+            inline.push(Decoration.replace({}).range(first.from, first.to));
+          }
+          if (hasLang) {
+            inline.push(Decoration.mark({ class: 'cm-lang' }).range(infoNode.from, infoNode.to));
+          } else {
+            inline.push(Decoration.widget({ widget: new PlainWidget(), side: 1 }).range(line.from));
+          }
+          return;
+        }
+        if (isCloseFence) {
+          if (!lineActive) {
+            inline.push(Decoration.replace({}).range(last.from, last.to));
+          }
+          return;
+        }
+        if (uiSettings.lineNumbers) {
+          inline.push(Decoration.widget({ widget: new LnWidget(n++), side: -1 }).range(line.from));
+        }
+        // 非编辑行：前导缩进显示为圆点（一个 · = 一个 Tab 宽，保持列对齐）
+        if (uiSettings.indentDots && !lineActive) {
+          const indent = (line.text.match(/^ */) || [''])[0].length;
+          const tw = uiSettings.tabWidth;
+          const levels = Math.floor(indent / tw);
+          if (levels > 0) {
+            inline.push(
+              Decoration.replace({ widget: new DotsWidget(levels, tw) }).range(
+                line.from,
+                line.from + levels * tw
+              )
+            );
+          }
+        }
+      });
+    },
+  });
+
+  return Decoration.set(lineDecos.concat(inline), true);
+}
+
+const mdPreview = ViewPlugin.fromClass(
   class {
     constructor(view) {
-      this.decorations = buildPreviewDecos(view);
+      this.decorations = buildMdDecos(view);
     }
     update(u) {
       if (u.docChanged || u.selectionSet || u.viewportChanged) {
-        this.decorations = buildPreviewDecos(u.view);
+        this.decorations = buildMdDecos(u.view);
+      }
+    }
+  },
+  { decorations: (v) => v.decorations }
+);
+
+const codeCard = ViewPlugin.fromClass(
+  class {
+    constructor(view) {
+      this.decorations = buildCardDecos(view);
+    }
+    update(u) {
+      if (u.docChanged || u.selectionSet || u.viewportChanged) {
+        this.decorations = buildCardDecos(u.view);
       }
     }
   },
@@ -536,15 +593,16 @@ function listContinuation(view) {
   return true;
 }
 
-// Tab：固定插入 2 空格（= 一个缩进格 ·），光标随之移到空格后
+// Tab：固定插入一个缩进格（= Tab 宽度空格 = 一个 ·），光标随之移到空格后
 function tabIndent(view) {
   if (view.composing) return false;
+  const unit = ' '.repeat(uiSettings.tabWidth);
   const { state } = view;
   const sel = state.selection.main;
   if (!sel.empty) {
     const changes = [];
     for (let line = state.doc.lineAt(sel.from); ; ) {
-      changes.push({ from: line.from, insert: '  ' });
+      changes.push({ from: line.from, insert: unit });
       if (line.to >= sel.to) break;
       line = state.doc.lineAt(line.to + 1);
     }
@@ -552,20 +610,21 @@ function tabIndent(view) {
     return true;
   }
   view.dispatch({
-    changes: { from: sel.from, insert: '  ' },
-    selection: { anchor: sel.from + 2 },
+    changes: { from: sel.from, insert: unit },
+    selection: { anchor: sel.from + unit.length },
     userEvent: 'input.indent',
   });
   return true;
 }
 
-// Shift+Tab：每行去掉最多 2 个前导空格
+// Shift+Tab：每行去掉至多一个缩进格的前导空格
 function tabDedent(view) {
+  const re = new RegExp('^ {1,' + uiSettings.tabWidth + '}');
   const { state } = view;
   const sel = state.selection.main;
   const changes = [];
   for (let line = state.doc.lineAt(sel.from); ; ) {
-    const m = line.text.match(/^ {1,2}/);
+    const m = line.text.match(re);
     if (m) changes.push({ from: line.from, to: line.from + m[0].length });
     if (line.to >= sel.to) break;
     line = state.doc.lineAt(line.to + 1);
@@ -583,11 +642,12 @@ const view = new EditorView({
     extensions: [
       history(),
       EditorView.lineWrapping,
-      indentUnit.of('  '), // Tab / 自动缩进用 2 空格（VSCode 习惯）
+      indentComp.of(indentUnit.of('  ')), // Tab/自动缩进宽度（设置可改为 4）
       placeholder('记下此刻的灵感…'),
       markdown({ base: markdownLanguage, codeLanguages: languages }),
       syntaxHighlighting(highlight),
-      livePreview,
+      previewComp.of(mdPreview),
+      codeCard,
       keymap.of([
         { key: 'Enter', run: listContinuation },
         { key: 'Mod-b', run: wrapMark('**') },
@@ -617,6 +677,10 @@ const view = new EditorView({
         },
         keydown(event) {
           if (event.isComposing || event.keyCode === 229) return false;
+          if (settingsOpen && event.key === 'Escape') {
+            closeSettings();
+            return true;
+          }
           if (modalOpen && event.key === 'Escape') {
             closeModal();
             return true;
@@ -627,9 +691,18 @@ const view = new EditorView({
             bridge.hide();
             return true;
           }
-          if (event.ctrlKey && !event.altKey && (event.key === 'n' || event.key === 'N')) {
+          if (event.altKey && !event.ctrlKey && (event.key === 'n' || event.key === 'N')) {
             flushAndSend();
             bridge.newPage();
+            return true;
+          }
+          // Alt+Del：删除当前页（普通 Del 完全保留给文本编辑）
+          if (
+            event.altKey && !event.ctrlKey && !event.shiftKey && !event.metaKey &&
+            event.key === 'Delete' && currentFile
+          ) {
+            event.preventDefault();
+            confirmDelete({ path: currentFile });
             return true;
           }
           if (event.ctrlKey && !event.altKey && (event.key === 's' || event.key === 'S')) {
@@ -738,6 +811,200 @@ function confirmDelete(page) {
     },
   });
 }
+
+// ---------- 设置面板 ----------
+
+const settingsMask = document.getElementById('settings-mask');
+const hotkeyBtn = document.getElementById('set-hotkey');
+let settingsOpen = false;
+let hotkeyListening = false;
+let lastHotkey = 'Alt+Q';
+
+function segSet(id, v) {
+  for (const b of document.getElementById(id).querySelectorAll('button')) {
+    b.classList.toggle('on', b.dataset.v === v);
+  }
+}
+
+function fillSettings(s) {
+  lastHotkey = s.hotkey;
+  hotkeyBtn.textContent = s.hotkey;
+  hotkeyBtn.classList.remove('listening', 'fail');
+  segSet('set-theme', s.theme);
+  document.getElementById('set-autostart').checked = !!s.autostart;
+  document.getElementById('set-notesdir').textContent = s.notesDir;
+  document.getElementById('set-font-size').textContent = s.fontSize;
+  segSet('set-tabwidth', String(s.tabWidth));
+  document.getElementById('set-livepreview').checked = s.livePreview !== false;
+  document.getElementById('set-linenumbers').checked = s.lineNumbers !== false;
+  document.getElementById('set-indentdots').checked = s.indentDots !== false;
+  document.getElementById('set-alwaysontop').checked = s.alwaysOnTop !== false;
+  document.getElementById('set-version').textContent = 'NoteAnywhere v' + s.version;
+}
+
+async function openSettings() {
+  try {
+    fillSettings(await bridge.getSettings());
+  } catch {}
+  settingsOpen = true;
+  settingsMask.hidden = false;
+}
+
+function closeSettings() {
+  if (!settingsOpen) return;
+  settingsOpen = false;
+  hotkeyListening = false;
+  settingsMask.hidden = true;
+}
+
+function updateHintKeys(hotkey) {
+  const el = document.querySelector('#hint span:first-child');
+  if (el && hotkey) el.textContent = hotkey + ' / Esc 收起并保存 · Alt+N 新建 · Alt+Del 删除本页';
+}
+
+// 主进程推送设置变化：应用并同步面板
+bridge.onSettingsChanged((s) => {
+  uiSettings.fontSize = s.fontSize || 15;
+  uiSettings.tabWidth = s.tabWidth === 4 ? 4 : 2;
+  uiSettings.lineNumbers = s.lineNumbers !== false;
+  uiSettings.indentDots = s.indentDots !== false;
+  document.documentElement.style.setProperty('--font-size', uiSettings.fontSize + 'px');
+  view.dispatch({
+    effects: [
+      indentComp.reconfigure(indentUnit.of(' '.repeat(uiSettings.tabWidth))),
+      previewComp.reconfigure(s.livePreview === false ? [] : mdPreview),
+    ],
+  });
+  if (s.hotkey) {
+    lastHotkey = s.hotkey;
+    updateHintKeys(s.hotkey);
+  }
+  if (settingsOpen) {
+    bridge.getSettings().then(fillSettings).catch(() => {});
+  }
+});
+
+bridge.onOpenSettings(() => openSettings());
+
+document.getElementById('settings-btn').addEventListener('click', () => {
+  settingsOpen ? closeSettings() : openSettings();
+});
+document.getElementById('settings-close').addEventListener('click', closeSettings);
+settingsMask.addEventListener('mousedown', (e) => {
+  if (e.target === settingsMask) closeSettings();
+});
+
+// 主题
+document.getElementById('set-theme').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  bridge.setSetting('theme', b.dataset.v).then((r) => r && r.ok && segSet('set-theme', b.dataset.v));
+});
+
+// Tab 宽度
+document.getElementById('set-tabwidth').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  bridge.setSetting('tabWidth', Number(b.dataset.v)).then((r) => r && r.ok && segSet('set-tabwidth', b.dataset.v));
+});
+
+// 开关类
+for (const [id, key] of [
+  ['set-autostart', 'autostart'],
+  ['set-livepreview', 'livePreview'],
+  ['set-linenumbers', 'lineNumbers'],
+  ['set-indentdots', 'indentDots'],
+  ['set-alwaysontop', 'alwaysOnTop'],
+]) {
+  const el = document.getElementById(id);
+  el.addEventListener('change', () => bridge.setSetting(key, el.checked));
+}
+
+// 字号
+const fontSizeEl = document.getElementById('set-font-size');
+document.getElementById('set-font-minus').addEventListener('click', () => {
+  const n = Math.max(14, Number(fontSizeEl.textContent) - 1);
+  bridge.setSetting('fontSize', n).then((r) => r && r.ok && (fontSizeEl.textContent = n));
+});
+document.getElementById('set-font-plus').addEventListener('click', () => {
+  const n = Math.min(18, Number(fontSizeEl.textContent) + 1);
+  bridge.setSetting('fontSize', n).then((r) => r && r.ok && (fontSizeEl.textContent = n));
+});
+
+// 保存目录
+document.getElementById('set-notesdir-change').addEventListener('click', async () => {
+  const r = await bridge.pickNotesDir();
+  if (r && r.ok) {
+    document.getElementById('set-notesdir').textContent = r.dir;
+    refreshList();
+  }
+});
+document.getElementById('set-notesdir-open').addEventListener('click', () => bridge.openPath('notes'));
+document.getElementById('set-open-notes').addEventListener('click', () => bridge.openPath('notes'));
+document.getElementById('set-open-userdata').addEventListener('click', () => bridge.openPath('userData'));
+document.getElementById('set-reset-window').addEventListener('click', () => bridge.resetWindow());
+
+// 热键录入：点击后捕获下一个组合键（Esc 取消）
+hotkeyBtn.addEventListener('click', () => {
+  if (hotkeyListening) return;
+  hotkeyListening = true;
+  hotkeyBtn.textContent = '按下新组合键…';
+  hotkeyBtn.classList.add('listening');
+  hotkeyBtn.classList.remove('fail');
+});
+
+function accelFromEvent(e) {
+  const mods = [];
+  if (e.ctrlKey) mods.push('Ctrl');
+  if (e.altKey) mods.push('Alt');
+  if (e.shiftKey) mods.push('Shift');
+  if (e.metaKey) mods.push('Super');
+  if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return null; // 只有修饰键
+  const k = e.key;
+  const named = { ' ': 'Space', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right' };
+  let key = null;
+  if (named[k] !== undefined) key = named[k];
+  else if (/^[a-zA-Z0-9]$/.test(k)) key = k.toUpperCase();
+  else if (/^F([1-9]|1[0-2])$/.test(k)) key = k;
+  else if (k.length === 1) key = k;
+  if (!key || !mods.length) return null;
+  return mods.join('+') + '+' + key;
+}
+
+window.addEventListener(
+  'keydown',
+  (e) => {
+    if (!hotkeyListening) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.key === 'Escape') {
+      hotkeyListening = false;
+      hotkeyBtn.textContent = lastHotkey;
+      hotkeyBtn.classList.remove('listening');
+      return;
+    }
+    const acc = accelFromEvent(e);
+    if (!acc) return; // 等待完整组合
+    hotkeyListening = false;
+    bridge.setSetting('hotkey', acc).then((r) => {
+      if (r && r.ok) {
+        hotkeyBtn.textContent = acc;
+        lastHotkey = acc;
+        hotkeyBtn.classList.remove('listening');
+        updateHintKeys(acc);
+      } else {
+        hotkeyBtn.textContent = (r && r.error) || '注册失败';
+        hotkeyBtn.classList.remove('listening');
+        hotkeyBtn.classList.add('fail');
+        setTimeout(() => {
+          hotkeyBtn.textContent = lastHotkey;
+          hotkeyBtn.classList.remove('fail');
+        }, 1600);
+      }
+    });
+  },
+  true
+);
 
 // ---------- 侧栏文档列表 ----------
 
@@ -860,6 +1127,7 @@ function flushAndSend() {
 
 bridge.onRestore(({ text, caret, file }) => {
   closeModal();
+  closeSettings();
   if (view.state.doc.toString() !== text) {
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
   }

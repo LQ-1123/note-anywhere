@@ -11,19 +11,113 @@
     <aside id="side">
       <div id="side-head">
         <span id="side-title">文档</span>
-        <button id="new-btn" title="新建一页（Ctrl+N）">＋</button>
+        <button id="new-btn" title="新建一页（Alt+N）">＋</button>
       </div>
       <div id="page-list"></div>
+      <div id="side-foot">
+        <button id="settings-btn" title="设置">⚙</button>
+      </div>
     </aside>
     <header id="bar">
       <div id="title">新的一页</div>
     </header>
     <div id="editor"></div>
     <footer id="hint">
-      <span>Alt+Q / Esc 收起并保存 · Ctrl+N 新建一页</span>
+      <span>Alt+Q / Esc 收起并保存 · Alt+N 新建 · Alt+Del 删除本页</span>
       <span id="saved-at"></span>
     </footer>
   </div>
+
+  <!-- 设置面板 -->
+  <div id="settings-mask" hidden>
+    <div id="settings-panel">
+      <div id="settings-head">
+        <span>设置</span>
+        <button id="settings-close" title="关闭">✕</button>
+      </div>
+      <div id="settings-body">
+        <section>
+          <h3>通用</h3>
+          <div class="set-row">
+            <span class="set-label">呼出热键</span>
+            <button id="set-hotkey" class="set-btn" title="点击后按下新的组合键"></button>
+          </div>
+          <div class="set-row">
+            <span class="set-label">主题</span>
+            <div class="seg" id="set-theme">
+              <button data-v="system">跟随系统</button>
+              <button data-v="dark">深色</button>
+              <button data-v="light">浅色</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <span class="set-label">开机自启</span>
+            <label class="switch"><input type="checkbox" id="set-autostart" /><span></span></label>
+          </div>
+          <div class="set-row col">
+            <span class="set-label">笔记保存目录</span>
+            <div class="set-dir-row">
+              <span id="set-notesdir" class="set-path"></span>
+              <button id="set-notesdir-change" class="set-btn">更改</button>
+              <button id="set-notesdir-open" class="set-btn">打开</button>
+            </div>
+          </div>
+        </section>
+
+        <section>
+          <h3>编辑器</h3>
+          <div class="set-row">
+            <span class="set-label">正文字号</span>
+            <div class="stepper">
+              <button id="set-font-minus">−</button>
+              <span id="set-font-size">15</span>
+              <button id="set-font-plus">＋</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <span class="set-label">Tab 宽度</span>
+            <div class="seg" id="set-tabwidth">
+              <button data-v="2">2 空格</button>
+              <button data-v="4">4 空格</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <span class="set-label">Markdown 实时渲染</span>
+            <label class="switch"><input type="checkbox" id="set-livepreview" /><span></span></label>
+          </div>
+          <div class="set-row">
+            <span class="set-label">代码块行号</span>
+            <label class="switch"><input type="checkbox" id="set-linenumbers" /><span></span></label>
+          </div>
+          <div class="set-row">
+            <span class="set-label">缩进圆点</span>
+            <label class="switch"><input type="checkbox" id="set-indentdots" /><span></span></label>
+          </div>
+        </section>
+
+        <section>
+          <h3>窗口与数据</h3>
+          <div class="set-row">
+            <span class="set-label">窗口置顶</span>
+            <label class="switch"><input type="checkbox" id="set-alwaysontop" /><span></span></label>
+          </div>
+          <div class="set-row">
+            <span class="set-label">窗口位置</span>
+            <button id="set-reset-window" class="set-btn">重置（下次呼出居中）</button>
+          </div>
+          <div class="set-row col">
+            <span class="set-label">关于</span>
+            <div class="set-dir-row">
+              <span class="set-path" id="set-version"></span>
+              <button id="set-open-notes" class="set-btn">笔记目录</button>
+              <button id="set-open-userdata" class="set-btn">数据目录</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
   <script src="app.bundle.js"></script>
 </body>
 </html>
