@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'" />
+  <title>NoteAnywhere</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="stage">
+    <aside id="side">
+      <div id="side-head">
+        <span id="side-title">文档</span>
+        <button id="new-btn" title="新建一页（Ctrl+N）">＋</button>
+      </div>
+      <div id="page-list"></div>
+    </aside>
+    <header id="bar">
+      <div id="title">新的一页</div>
+    </header>
+    <textarea id="editor" placeholder="记下此刻的灵感…" spellcheck="false" autocomplete="off"></textarea>
+    <footer id="hint">
+      <span>Alt+Q / Esc 收起并保存 · Ctrl+N 新建一页</span>
+      <span id="saved-at"></span>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

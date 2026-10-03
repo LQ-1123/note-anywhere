@@ -1,0 +1,262 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --side: #191919;
+  --bg: #1e1e1e;
+  --hover: #242424;
+  --active: #2b2b2b;
+  --text: #dcdcdc;
+  --muted: #8a8a8a;
+  --faint: #5f5f5f;
+  --hairline: #2a2a2a;
+  --accent: #a882ff;
+  --accent-soft: rgba(168, 130, 255, 0.16);
+  --scrollbar: #333;
+}
+
+body.theme-light {
+  --side: #f1f1f1;
+  --bg: #ffffff;
+  --hover: #e9e9e9;
+  --active: #e0e0e0;
+  --text: #242424;
+  --muted: #666666;
+  --faint: #a3a3a3;
+  --hairline: #e3e3e3;
+  --accent: #7c5cff;
+  --accent-soft: rgba(124, 92, 255, 0.13);
+  --scrollbar: #cfcfcf;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--side);
+  color: var(--text);
+  font-family: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  user-select: none;
+}
+
+#stage {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: 46px 1fr 30px;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.16s ease-out, transform 0.16s ease-out;
+}
+
+#stage.in {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- 侧栏 ---------- */
+
+#side {
+  grid-row: 1 / 4;
+  grid-column: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--side);
+  border-right: 1px solid var(--hairline);
+  min-width: 0;
+}
+
+#side-head {
+  -webkit-app-region: drag;
+  flex: none;
+  height: 46px;
+  padding: 0 10px 0 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+#side-title {
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+}
+
+#new-btn {
+  -webkit-app-region: no-drag;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+
+#new-btn:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+#page-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px 12px;
+}
+
+#page-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+#page-list::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 4px;
+}
+
+#page-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#empty-tip {
+  padding: 18px 12px;
+  font-size: 12px;
+  color: var(--faint);
+  text-align: center;
+}
+
+.page-item {
+  padding: 7px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  margin-bottom: 1px;
+  transition: background 0.1s;
+}
+
+.page-item:hover {
+  background: var(--hover);
+}
+
+.page-item.active {
+  background: var(--active);
+}
+
+.page-title {
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.page-item.active .page-title {
+  color: var(--accent);
+}
+
+.page-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+/* ---------- 顶栏 ---------- */
+
+#bar {
+  -webkit-app-region: drag;
+  grid-row: 1;
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--hairline);
+  min-width: 0;
+}
+
+#title {
+  font-size: 13px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#title.named {
+  color: var(--text);
+}
+
+/* ---------- 书写区 ---------- */
+
+#editor {
+  grid-row: 2;
+  grid-column: 2;
+  resize: none;
+  border: none;
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+  caret-color: var(--accent);
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.75;
+  padding: 26px 32px 20px;
+  user-select: text;
+}
+
+#editor::placeholder {
+  color: var(--faint);
+}
+
+#editor::selection {
+  background: var(--accent-soft);
+}
+
+#editor::-webkit-scrollbar {
+  width: 8px;
+}
+
+#editor::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 4px;
+}
+
+#editor::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
+#editor::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- 底栏 ---------- */
+
+#hint {
+  grid-row: 3;
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  background: var(--bg);
+  border-top: 1px solid var(--hairline);
+  font-size: 11.5px;
+  color: var(--faint);
+  letter-spacing: 0.02em;
+}
+
+#saved-at {
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity 0.4s;
+}
+
+#saved-at.show {
+  opacity: 1;
+}

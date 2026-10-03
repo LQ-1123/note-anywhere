@@ -1,0 +1,44 @@
+{
+  "name": "note-anywhere",
+  "version": "1.0.0",
+  "description": "Alt+Q 呼出的灵感速记 — 顶置书写卡，收起即保存为 Markdown",
+  "main": "main.js",
+  "author": "noteanywhere",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "icon": "node tools/gen-icon.js",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.noteanywhere.app",
+    "productName": "NoteAnywhere",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "artifactName": "NoteAnywhere-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "NoteAnywhere-Portable.${ext}"
+    }
+  }
+}
