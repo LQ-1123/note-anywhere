@@ -264,52 +264,47 @@ function buildMdDecos(view) {
 }
 
 function scanInlineHtml(line, head, out) {
-  // 标签隐藏采用节点级判定：光标在该片段范围内才显示源码标签，否则隐藏、效果常显
-  const tagVisible = (from, to) => head >= from && head <= to;
+  // 标签仅在光标位于标签字符内部（< 与 > 之间）时显示，其余一律隐藏、效果常显
+  const inTagText = (a, b) => head > a && head < b;
+  const hideTags = (openFrom, openTo, closeFrom, closeTo, contentFrom, contentTo, markDeco) => {
+    if (!inTagText(openFrom, openTo)) {
+      out.push(Decoration.replace({}).range(openFrom, openTo));
+    }
+    if (!inTagText(closeFrom, closeTo)) {
+      out.push(Decoration.replace({}).range(closeFrom, closeTo));
+    }
+    out.push(markDeco.range(contentFrom, contentTo));
+  };
   let m;
 
-  const RE_U = /<u>([^<]*)<\/u>/g;
+  const RE_U = /<u>(.*?)<\/u>/g;
   for (m of line.text.matchAll(RE_U)) {
     const openFrom = line.from + m.index;
     const contentFrom = openFrom + 3;
     const contentTo = contentFrom + m[1].length;
     const closeTo = contentTo + 4;
-    if (!tagVisible(openFrom, closeTo)) {
-      out.push(Decoration.replace({}).range(openFrom, contentFrom));
-      out.push(Decoration.replace({}).range(contentTo, closeTo));
-    }
-    out.push(Decoration.mark({ class: 'cm-u' }).range(contentFrom, contentTo));
+    hideTags(openFrom, contentFrom, contentTo, closeTo, contentFrom, contentTo, Decoration.mark({ class: 'cm-u' }));
   }
 
-  const RE_MARK = /<mark>([^<]*)<\/mark>/g;
+  const RE_MARK = /<mark>(.*?)<\/mark>/g;
   for (m of line.text.matchAll(RE_MARK)) {
     const openFrom = line.from + m.index;
     const contentFrom = openFrom + 6;
     const contentTo = contentFrom + m[1].length;
     const closeTo = contentTo + 7;
-    if (!tagVisible(openFrom, closeTo)) {
-      out.push(Decoration.replace({}).range(openFrom, contentFrom));
-      out.push(Decoration.replace({}).range(contentTo, closeTo));
-    }
-    out.push(Decoration.mark({ class: 'cm-highlight' }).range(contentFrom, contentTo));
+    hideTags(openFrom, contentFrom, contentTo, closeTo, contentFrom, contentTo, Decoration.mark({ class: 'cm-highlight' }));
   }
 
-  const RE_FS = /<span style="font-size:(\d+)px">([^<]*)<\/span>/g;
+  const RE_FS = /<span style="font-size:(\d+)px">(.*?)<\/span>/g;
   for (m of line.text.matchAll(RE_FS)) {
     const openFrom = line.from + m.index;
     const openTo = openFrom + m[0].indexOf('>') + 1;
     const contentFrom = openTo;
     const contentTo = contentFrom + m[2].length;
     const closeTo = contentTo + 7;
-    if (!tagVisible(openFrom, closeTo)) {
-      out.push(Decoration.replace({}).range(openFrom, openTo));
-      out.push(Decoration.replace({}).range(contentTo, closeTo));
-    }
-    out.push(
-      Decoration.mark({ class: 'cm-fs', attributes: { style: 'font-size:' + m[1] + 'px' } }).range(
-        contentFrom,
-        contentTo
-      )
+    hideTags(
+      openFrom, openTo, contentTo, closeTo, contentFrom, contentTo,
+      Decoration.mark({ class: 'cm-fs', attributes: { style: 'font-size:' + m[1] + 'px' } })
     );
   }
 }
@@ -1116,43 +1111,67 @@ function hideCtx() {
   ctxSel = null;
 }
 
-// 判断选区是否已被 open/close 包裹（含选区内部自带记号两种情况）
-function wrapState(sel, open, close) {
+// 在选区所在行查找“包裹住选区”的 open/close 标记对（容忍选区边界不精确）
+function findEnclosing(sel, open, close) {
   const doc = view.state.doc;
-  const text = doc.sliceString(sel.from, sel.to);
-  if (
-    text.length >= open.length + close.length &&
-    text.startsWith(open) && text.endsWith(close)
-  ) {
-    return 'inner';
+  if (doc.lineAt(sel.from).number !== doc.lineAt(sel.to).number) return null;
+  const line = doc.lineAt(sel.from);
+  const text = line.text;
+  let idx = 0;
+  while ((idx = text.indexOf(open, idx)) !== -1) {
+    const closeIdx = text.indexOf(close, idx + open.length);
+    if (closeIdx === -1) return null;
+    const openFrom = line.from + idx;
+    const contentFrom = openFrom + open.length;
+    const contentTo = line.from + closeIdx;
+    const closeTo = contentTo + close.length;
+    if (sel.from >= contentFrom && sel.to <= contentTo) {
+      return { openFrom, contentFrom, contentTo, closeTo };
+    }
+    idx = closeIdx + close.length;
   }
-  const before = doc.sliceString(Math.max(0, sel.from - open.length), sel.from);
-  const after = doc.sliceString(sel.to, Math.min(doc.length, sel.to + close.length));
-  if (before === open && after === close) return 'outer';
   return null;
 }
 
-// 包裹/取消包裹；返回新的选区范围
+// 查找包裹选区的字号 span
+function findSpan(sel) {
+  const doc = view.state.doc;
+  if (doc.lineAt(sel.from).number !== doc.lineAt(sel.to).number) return null;
+  const line = doc.lineAt(sel.from);
+  const text = line.text;
+  let idx = 0;
+  while ((idx = text.indexOf('<span style="font-size:', idx)) !== -1) {
+    const gt = text.indexOf('>', idx);
+    const closeIdx = gt === -1 ? -1 : text.indexOf('</span>', gt);
+    if (gt === -1 || closeIdx === -1) return null; // 标签残缺，不处理
+    const openFrom = line.from + idx;
+    const openTo = line.from + gt + 1;
+    const contentFrom = openTo;
+    const contentTo = line.from + closeIdx;
+    const closeTo = contentTo + 7;
+    if (sel.from >= contentFrom && sel.to <= contentTo) {
+      const sm = text.slice(idx, gt).match(/(\d+)px/);
+      return { openFrom, openTo, contentFrom, contentTo, closeTo, size: sm ? Number(sm[1]) : null };
+    }
+    idx = closeIdx + 7;
+  }
+  return null;
+}
+
+// 包裹/取消包裹（选区落在已包裹内容内任意位置都识别为“取消”）
 function applyWrap(open, close) {
   const sel = ctxSel || view.state.selection.main;
-  const mode = wrapState(sel, open, close);
+  const enc = findEnclosing(sel, open, close);
   let changes;
   let anchor;
   let head;
-  if (mode === 'inner') {
+  if (enc) {
     changes = [
-      { from: sel.from, to: sel.from + open.length },
-      { from: sel.to - close.length, to: sel.to },
+      { from: enc.openFrom, to: enc.contentFrom },
+      { from: enc.contentTo, to: enc.closeTo },
     ];
-    anchor = sel.from;
-    head = sel.to - open.length - close.length;
-  } else if (mode === 'outer') {
-    changes = [
-      { from: sel.from - open.length, to: sel.from },
-      { from: sel.to, to: sel.to + close.length },
-    ];
-    anchor = sel.from - open.length;
-    head = sel.to - open.length;
+    anchor = enc.openFrom;
+    head = enc.contentTo - open.length;
   } else {
     changes = [
       { from: sel.from, insert: open },
@@ -1189,28 +1208,24 @@ function stepFontSize(dir) {
     if (next !== uiSettings.fontSize) bridge.setSetting('fontSize', next);
     return;
   }
-  // 检测选区是否已被字号 span 包裹
-  const doc = view.state.doc;
-  const before = doc.sliceString(Math.max(0, sel.from - 40), sel.from);
-  const m = before.match(/<span style="font-size:(\d+)px">$/);
-  const wrapped = !!(m && doc.sliceString(sel.to, Math.min(doc.length, sel.to + 7)) === '</span>');
-  const cur = wrapped ? Number(m[1]) : uiSettings.fontSize;
-  const next = Math.min(28, Math.max(10, cur + dir * 2));
-  const open = '<span style="font-size:' + next + 'px">';
-
-  // 变更按位置升序提交（CodeMirror 要求），只替换标签本身、内容不动
-  const changes = [];
-  if (wrapped) {
-    const spanStart = sel.from - ('<span style="font-size:' + m[1] + 'px">').length;
-    const spanEnd = sel.to + 7;
-    changes.push({ from: spanStart, to: spanStart + ('<span style="font-size:' + m[1] + 'px">').length, insert: open });
-    changes.push({ from: spanEnd - 7, to: spanEnd });
-  } else {
-    changes.push({ from: sel.from, insert: open });
-    changes.push({ from: sel.to, insert: '</span>' });
+  const enc = findSpan(sel);
+  if (enc && enc.size) {
+    // 已包裹：只替换开标签（尺寸写在开标签里），内容与选区原位不动
+    const next = Math.min(28, Math.max(10, enc.size + dir * 2));
+    const open = '<span style="font-size:' + next + 'px">';
+    view.dispatch({
+      changes: [{ from: enc.openFrom, to: enc.openTo, insert: open }],
+      selection: { anchor: sel.from, head: sel.to },
+      userEvent: 'input.wrap',
+    });
+    return;
   }
+  const open = '<span style="font-size:' + Math.min(28, Math.max(10, uiSettings.fontSize + dir * 2)) + 'px">';
   view.dispatch({
-    changes,
+    changes: [
+      { from: sel.from, insert: open },
+      { from: sel.to, insert: '</span>' },
+    ],
     selection: { anchor: sel.from + open.length, head: sel.to + open.length },
     userEvent: 'input.wrap',
   });
@@ -1247,20 +1262,20 @@ function renderCtxMenu(page) {
   }
   const sel = ctxSel;
   ctxMenu.appendChild(
-    ctxRow(wrapState(sel, '**', '**') ? '取消加粗' : '加粗', 'Ctrl+B', () => applyWrap('**', '**'))
+    ctxRow(findEnclosing(sel, '**', '**') ? '取消加粗' : '加粗', 'Ctrl+B', () => applyWrap('**', '**'))
   );
   ctxMenu.appendChild(
-    ctxRow(wrapState(sel, '*', '*') ? '取消斜体' : '斜体', 'Ctrl+I', () => applyWrap('*', '*'))
+    ctxRow(findEnclosing(sel, '*', '*') ? '取消斜体' : '斜体', 'Ctrl+I', () => applyWrap('*', '*'))
   );
   ctxMenu.appendChild(ctxRow('调整字号', 'Ctrl+±', () => renderCtxMenu('size'), true));
   ctxMenu.appendChild(
-    ctxRow(wrapState(sel, '<u>', '</u>') ? '取消下划线' : '下划线', '', () => applyWrap('<u>', '</u>'))
+    ctxRow(findEnclosing(sel, '<u>', '</u>') ? '取消下划线' : '下划线', '', () => applyWrap('<u>', '</u>'))
   );
   ctxMenu.appendChild(
-    ctxRow(wrapState(sel, '<mark>', '</mark>') ? '取消荧光笔' : '荧光笔', '', () => applyWrap('<mark>', '</mark>'))
+    ctxRow(findEnclosing(sel, '<mark>', '</mark>') ? '取消荧光笔' : '荧光笔', '', () => applyWrap('<mark>', '</mark>'))
   );
   ctxMenu.appendChild(
-    ctxRow(wrapState(sel, '`', '`') ? '取消行内代码' : '转换为代码', '', () => applyWrap('`', '`'))
+    ctxRow(findEnclosing(sel, '`', '`') ? '取消行内代码' : '转换为代码', '', () => applyWrap('`', '`'))
   );
 }
 
@@ -1376,7 +1391,11 @@ document.getElementById('new-btn').addEventListener('click', () => {
 // ---------- 保存与标题 ----------
 
 function titleFrom(text) {
-  const first = text.split('\n', 1)[0].replace(/^#{1,6}\s*/, '').trim();
+  const first = text
+    .split('\n', 1)[0]
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/<[^>]*>?/g, '') // 顶栏标题不显示行内 HTML 标签
+    .trim();
   return first ? first.slice(0, 60) : '新的一页';
 }
 
@@ -1433,7 +1452,7 @@ bridge.onRestore(({ text, caret, file }) => {
 if (location.search.indexOf('diag') !== -1) {
   (async () => {
     const sample =
-      '# 标题\n\n正文 <span style="font-size:24px">132</span> 尾巴\n<u>下划线文字</u> <mark>荧光文字</mark>\n\n```cpp\n#include <iostream>\nusing namespace std;\nint main() {\n  std::cout << "hi" << x;\n}\n```\n';
+      '# 标题\n\n正文 <span style="font-size:24px">外层大字<u>嵌套下划线</u>尾部</span> 结束\n<u>纯下划线</u> <mark>纯荧光</mark> **加粗叠加<mark>荧光</mark>**\n\n```cpp\n#include <iostream>\nusing namespace std;\nint main() {\n  std::cout << "hi" << x;\n}\n```\n';
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: sample } });
     view.dispatch({ selection: { anchor: 0 } }); // 光标移到文档开头，所有标签应隐藏
     await new Promise((r) => setTimeout(r, 1500)); // 等嵌套语言懒加载

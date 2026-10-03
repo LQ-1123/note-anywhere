@@ -105,6 +105,7 @@ function pageTitle(filePath) {
       .split('\n')[0]
       .replace(/\r$/, '')
       .replace(/^#{1,6}\s*/, '')
+      .replace(/<[^>]*>?/g, '') // 侧栏标题不显示行内 HTML 标签
       .trim();
     return first || '';
   } catch {
