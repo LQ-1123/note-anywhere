@@ -1,16 +1,23 @@
 {
   "name": "note-anywhere",
-  "version": "1.0.0",
+  "productName": "NoteAnywhere",
+  "version": "1.1.0",
   "description": "Alt+Q 呼出的灵感速记 — 顶置书写卡，收起即保存为 Markdown",
   "main": "main.js",
   "author": "noteanywhere",
   "license": "MIT",
   "scripts": {
-    "start": "electron .",
+    "bundle": "esbuild renderer/src/app.js --bundle --outfile=renderer/app.bundle.js --format=iife --target=chrome130 --minify",
+    "start": "npm run bundle && electron .",
+    "smoke": "npm run bundle && electron . --smoke",
     "icon": "node tools/gen-icon.js",
-    "dist": "electron-builder"
+    "dist": "npm run bundle && electron-builder"
   },
   "devDependencies": {
+    "@codemirror/lang-markdown": "^6.0.0",
+    "@codemirror/language-data": "^6.0.0",
+    "codemirror": "^6.0.0",
+    "esbuild": "^0.25.0",
     "electron": "^44.5.1",
     "electron-builder": "^26.15.3"
   },

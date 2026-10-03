@@ -14,6 +14,7 @@ const path = require('path');
 const fs = require('fs');
 
 const IS_SMOKE = process.argv.includes('--smoke');
+const IS_DIAG = process.argv.includes('--diag');
 const HOTKEY = 'Alt+Q';
 const DEFAULT_NOTES_DIR = 'D:\\desktop\\insights';
 
@@ -158,7 +159,10 @@ function createWindow() {
     },
   });
   win.setAlwaysOnTop(true, 'floating');
-  win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  win.loadFile(
+    path.join(__dirname, 'renderer', 'index.html'),
+    IS_DIAG ? { search: 'diag=1' } : undefined
+  );
   win.on('close', (e) => {
     if (!quitting) {
       e.preventDefault();
@@ -169,6 +173,10 @@ function createWindow() {
     pageReady = true;
     sendTheme();
   });
+  // 渲染层报错转发到主进程日志，便于排查
+  win.webContents.on('console-message', (_e, level, message, _line, sourceId) => {
+    if (level >= 2) console.log(`[renderer:${level}]`, message, sourceId);
+  });
 }
 
 // 从渲染层拉取编辑器内容与光标（窗口隐藏后 executeJavaScript 依然可用）
@@ -176,8 +184,9 @@ async function flushEditor() {
   if (!win || !pageReady) return;
   try {
     const raw = await win.webContents.executeJavaScript(
-      `JSON.stringify({t: document.getElementById('editor').value, c: document.getElementById('editor').selectionStart})`
+      'window.__noteSnapshot ? window.__noteSnapshot() : null'
     );
+    if (!raw) return;
     const { t, c } = JSON.parse(raw);
     writeCurrentPage(t, c);
   } catch {}
@@ -308,6 +317,7 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     nativeTheme.themeSource = 'system';
     nativeTheme.on('updated', sendTheme);
+    Menu.setApplicationMenu(null); // 去掉默认菜单，避免 Ctrl+N 等加速键被截获
 
     createWindow();
     createTray();
@@ -334,6 +344,37 @@ if (!app.requestSingleInstanceLock()) {
       await new Promise((res) =>
         (pageReady ? Promise.resolve() : new Promise((r) => win.webContents.once('did-finish-load', r))).then(res)
       );
+      try {
+        const snapshotOk = await win.webContents.executeJavaScript('typeof window.__noteSnapshot');
+        if (snapshotOk !== 'function') throw new Error('editor bundle not initialized: ' + snapshotOk);
+        console.log('SMOKE editor OK');
+      } catch (err) {
+        console.error('SMOKE editor FAIL:', err.message);
+        process.exitCode = 1;
+      }
+      if (IS_DIAG) {
+        // 隐藏窗口的零视口会让 CodeMirror 不渲染行，诊断需可见：移到屏幕外显示
+        // 注意：必须在 new-page 检查之前跑，否则空文档恢复会清掉诊断样例
+        win.setBounds({ x: -3000, y: -3000, width: 900, height: 600 });
+        win.showInactive();
+        for (let i = 0; i < 14; i++) {
+          await new Promise((r) => setTimeout(r, 500));
+          const res = await win.webContents.executeJavaScript('window.__diagResult || null');
+          if (res) {
+            console.log('DIAG', res);
+            break;
+          }
+        }
+      }
+      try {
+        await newPage();
+        const snap = JSON.parse(await win.webContents.executeJavaScript('window.__noteSnapshot()'));
+        if (snap.t !== '' || loadState().file !== null) throw new Error('new-page not applied');
+        console.log('SMOKE new-page OK');
+      } catch (err) {
+        console.error('SMOKE new-page FAIL:', err.message);
+        process.exitCode = 1;
+      }
       try {
         ensureNotesDir();
         const probe = path.join(NOTES_DIR, '.smoke-test');
@@ -374,4 +415,24 @@ ipcMain.on('new-page', async () => {
 ipcMain.on('open-page', async (_e, p) => {
   if (!win.isVisible()) showOnly();
   await openPage(p);
+});
+ipcMain.handle('delete-page', async (_e, p) => {
+  const file = safePagePath(p);
+  if (!file || !fs.existsSync(file)) return { ok: false };
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    return { ok: false };
+  }
+  const st = loadState();
+  const carets = { ...(st.carets || {}) };
+  delete carets[file];
+  if (st.file === file) {
+    // 删除的是当前页：清空指向与编辑区，避免下次保存又写回新文件
+    saveState({ ...st, file: null, caret: 0, carets });
+    sendRestore('', 0, null);
+  } else {
+    saveState({ ...st, carets });
+  }
+  return { ok: true };
 });

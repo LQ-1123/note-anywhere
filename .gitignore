@@ -1,4 +1,5 @@
 node_modules/
 dist/
 .mimosa/
+renderer/app.bundle.js
 *.log

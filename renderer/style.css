@@ -16,6 +16,20 @@
   --accent: #a882ff;
   --accent-soft: rgba(168, 130, 255, 0.16);
   --scrollbar: #333;
+  /* 语法配色（VSCode Dark+） */
+  --code-bg: rgba(255, 255, 255, 0.05);
+  --code-active: rgba(255, 255, 255, 0.08);
+  --code-border: #333333;
+  --guide: rgba(255, 255, 255, 0.07);
+  --head: #b3a1f5;
+  --kw: #c586c0;   /* 控制流/模块关键字 */
+  --kw2: #569cd6;  /* 关键字 */
+  --str: #ce9178;
+  --com: #6a9955;
+  --num: #b5cea8;
+  --fn: #dcdcaa;
+  --type: #4ec9b0;
+  --var: #9cdcfe;
 }
 
 body.theme-light {
@@ -30,6 +44,20 @@ body.theme-light {
   --accent: #7c5cff;
   --accent-soft: rgba(124, 92, 255, 0.13);
   --scrollbar: #cfcfcf;
+  /* 语法配色（VSCode Light+ 提亮版，保证白底可辨） */
+  --code-bg: rgba(0, 0, 0, 0.045);
+  --code-active: rgba(0, 0, 0, 0.07);
+  --code-border: #d7d7d7;
+  --guide: rgba(0, 0, 0, 0.08);
+  --head: #6f5bd4;
+  --kw: #af00db;
+  --kw2: #0000ff;
+  --str: #b3232e;
+  --com: #0a7f50;
+  --num: #098658;
+  --fn: #9a6700;
+  --type: #0f7c92;
+  --var: #0550ae;
 }
 
 html,
@@ -47,14 +75,21 @@ body {
   display: grid;
   grid-template-columns: 220px 1fr;
   grid-template-rows: 46px 1fr 30px;
-  opacity: 0;
-  transform: translateY(6px);
-  transition: opacity 0.16s ease-out, transform 0.16s ease-out;
 }
 
 #stage.in {
-  opacity: 1;
-  transform: none;
+  animation: stage-in 0.16s ease-out;
+}
+
+@keyframes stage-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 /* ---------- 侧栏 ---------- */
@@ -132,11 +167,46 @@ body {
 }
 
 .page-item {
-  padding: 7px 10px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 7px 26px 7px 10px;
   border-radius: 7px;
   cursor: pointer;
   margin-bottom: 1px;
   transition: background 0.1s;
+}
+
+.page-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.page-del {
+  -webkit-app-region: no-drag;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  font-size: 14px;
+  line-height: 1;
+  width: 20px;
+  height: 20px;
+  margin-left: 2px;
+  border-radius: 5px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+  flex: none;
+}
+
+.page-item:hover .page-del {
+  opacity: 1;
+}
+
+.page-del:hover {
+  color: #e05555;
+  background: rgba(224, 85, 85, 0.12);
 }
 
 .page-item:hover {
@@ -192,50 +262,357 @@ body {
   color: var(--text);
 }
 
-/* ---------- 书写区 ---------- */
+/* ---------- 书写区（CodeMirror） ---------- */
 
 #editor {
   grid-row: 2;
   grid-column: 2;
-  resize: none;
-  border: none;
-  outline: none;
   background: var(--bg);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.cm-editor {
+  height: 100%;
+  background: transparent;
   color: var(--text);
+}
+
+.cm-editor.cm-focused {
+  outline: none;
+}
+
+.cm-scroller {
+  font-family: inherit !important;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.cm-content {
+  padding: 26px 32px 20px !important;
   caret-color: var(--accent);
-  font-family: inherit;
   font-size: 15px;
   line-height: 1.75;
-  padding: 26px 32px 20px;
   user-select: text;
 }
 
-#editor::placeholder {
+.cm-line {
+  padding: 0;
+}
+
+.cm-placeholder {
   color: var(--faint);
 }
 
-#editor::selection {
+.cm-cursor {
+  border-left: 2px solid var(--accent);
+}
+
+.cm-selectionBackground,
+.cm-content ::selection,
+.cm-line ::selection {
   background: var(--accent-soft);
 }
 
-#editor::-webkit-scrollbar {
+.cm-editor ::-webkit-scrollbar {
   width: 8px;
 }
 
-#editor::-webkit-scrollbar-thumb {
+.cm-editor ::-webkit-scrollbar-thumb {
   background: var(--scrollbar);
   border-radius: 4px;
 }
 
-#editor::-webkit-scrollbar-thumb:hover {
-  background: var(--accent);
-}
-
-#editor::-webkit-scrollbar-track {
+.cm-editor ::-webkit-scrollbar-track {
   background: transparent;
 }
 
-/* ---------- 底栏 ---------- */
+/* ---------- Markdown / 代码语法配色 ---------- */
+
+.tok-mark {
+  color: var(--faint); /* 实时渲染未覆盖的记号弱化 */
+}
+
+.tok-head {
+  color: var(--head);
+  font-weight: 600;
+}
+
+.tok-h1 { font-size: 1.3em; }
+.tok-h2 { font-size: 1.18em; }
+.tok-h3 { font-size: 1.08em; }
+.tok-h4 { font-size: 1.02em; }
+.tok-h5 { font-size: 1em; }
+.tok-h6 { font-size: 0.95em; color: var(--muted); }
+
+.tok-em { font-style: italic; }
+
+.tok-strong {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.tok-strike {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.tok-link { color: var(--accent); }
+
+.tok-url { color: var(--muted); }
+
+.tok-quote { color: var(--muted); }
+
+.tok-code {
+  font-family: "Cascadia Code", Consolas, "Courier New", monospace;
+  background: var(--code-bg);
+  border-radius: 3px;
+  padding: 1px 3px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* 代码块内部语言着色（VSCode） */
+.tok-kw { color: var(--kw); }
+.tok-kw2 { color: var(--kw2); }
+.tok-str { color: var(--str); }
+.tok-com { color: var(--com); font-style: italic; }
+.tok-num { color: var(--num); }
+.tok-fn { color: var(--fn); }
+.tok-var { color: var(--var); }
+.tok-type { color: var(--type); }
+
+/* ---------- 实时渲染装饰 ---------- */
+
+/* 引用：整行左侧竖线 */
+.cm-quote-line {
+  border-left: 3px solid var(--accent-soft);
+  padding-left: 12px;
+}
+
+/* 代码块：VSCode 式编辑器卡片 */
+.cm-code-line {
+  font-family: "Cascadia Code", Consolas, "Courier New", monospace;
+  font-size: 0.92em;
+  line-height: 1.6;
+  padding: 0 12px;
+  background-color: var(--code-bg);
+  border-left: 1px solid var(--code-border);
+  border-right: 1px solid var(--code-border);
+}
+
+.cm-code-top {
+  border-top: 1px solid var(--code-border);
+  border-radius: 8px 8px 0 0;
+  margin-top: 6px;
+}
+
+.cm-code-bottom {
+  border-bottom: 1px solid var(--code-border);
+  border-radius: 0 0 8px 8px;
+  margin-bottom: 6px;
+}
+
+.cm-code-active {
+  background-color: var(--code-active);
+}
+
+/* 行号列 */
+.cm-ln {
+  display: inline-block;
+  min-width: 2ch;
+  padding-right: 1.8ch;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+
+/* 缩进圆点（一个 · 一个缩进格） */
+.cm-dot {
+  color: var(--faint);
+  user-select: none;
+}
+
+/* 语言徽标 */
+.cm-lang,
+.tok-lang {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.82em;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding-left: 0.5ch;
+}
+
+/* 无语言围栏的「纯文本」提示 */
+.cm-lang-plain {
+  color: var(--faint);
+  font-size: 0.82em;
+  letter-spacing: 0.1em;
+  padding-left: 0.5ch;
+  user-select: none;
+}
+
+/* 分隔线 --- */
+.cm-hr {
+  display: inline-block;
+  width: 100%;
+  height: 1px;
+  background: var(--hairline);
+  vertical-align: middle;
+  margin: 0.55em 0;
+}
+
+/* 列表符号 • */
+.cm-bullet {
+  color: var(--accent);
+}
+
+/* ---------- 斜杠菜单 ---------- */
+
+#slash-menu {
+  position: absolute;
+  z-index: 30;
+  min-width: 190px;
+  max-height: 264px;
+  overflow-y: auto;
+  background: var(--side);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  padding: 4px;
+  font-size: 12.5px;
+}
+
+.slash-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.slash-item.sel {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.slash-hint {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+/* ---------- 应用内确认弹窗 ---------- */
+
+#modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.38);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: modal-fade 0.12s ease-out;
+}
+
+#modal-mask[hidden] {
+  display: none;
+}
+
+#modal {
+  min-width: 300px;
+  max-width: 380px;
+  background: var(--side);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+  padding: 18px 20px 16px;
+  animation: modal-in 0.14s ease-out;
+}
+
+@keyframes modal-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+#modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+#modal-text {
+  margin-top: 8px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+#modal-actions {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#modal-cancel,
+#modal-ok {
+  appearance: none;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--text);
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+#modal-cancel:hover {
+  background: var(--hover);
+}
+
+#modal-ok {
+  border-color: transparent;
+  color: #ffffff;
+  background: var(--accent);
+}
+
+#modal-ok:hover {
+  filter: brightness(1.08);
+}
+
+#modal-ok.danger {
+  background: #d9534f;
+}
+
+#modal-ok.danger:hover {
+  background: #e05555;
+}
+
+#modal-cancel:focus-visible,
+#modal-ok:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 
 #hint {
   grid-row: 3;

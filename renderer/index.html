@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
   <title>NoteAnywhere</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -18,12 +18,12 @@
     <header id="bar">
       <div id="title">新的一页</div>
     </header>
-    <textarea id="editor" placeholder="记下此刻的灵感…" spellcheck="false" autocomplete="off"></textarea>
+    <div id="editor"></div>
     <footer id="hint">
       <span>Alt+Q / Esc 收起并保存 · Ctrl+N 新建一页</span>
       <span id="saved-at"></span>
     </footer>
   </div>
-  <script src="app.js"></script>
+  <script src="app.bundle.js"></script>
 </body>
 </html>
