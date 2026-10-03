@@ -480,7 +480,55 @@ body {
   color: var(--accent);
 }
 
-/* ---------- 斜杠菜单 ---------- */
+/* ---------- 右键格式菜单 ---------- */
+
+#ctx-menu {
+  position: absolute;
+  z-index: 40;
+  min-width: 170px;
+  background: var(--side);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  padding: 4px;
+  font-size: 12.5px;
+}
+
+.ctx-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.ctx-item:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* ---------- 行内格式效果 ---------- */
+
+.cm-u {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.cm-highlight {
+  background: rgba(255, 213, 79, 0.45);
+  border-radius: 2px;
+}
+
+body.theme-light .cm-highlight {
+  background: rgba(255, 213, 79, 0.6);
+}
+
+.cm-fs {
+  /* 字号由内联 style 控制 */
+}
 
 #slash-menu {
   position: absolute;

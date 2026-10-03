@@ -217,8 +217,16 @@ function buildMdDecos(view) {
         return;
       }
 
+      // 行内样式（粗体/斜体/链接等）的源码显隐按“光标是否在该样式节点内”判定（Obsidian 习惯），
+      // 而非整行：加粗后光标稍移开标记即隐藏
+      const nodeActive = () => {
+        const p = ref.node.parent;
+        const pFrom = p ? p.from : from;
+        const pTo = p ? p.to : to;
+        return head >= pFrom && head <= pTo;
+      };
       const hide = () => {
-        if (lineInactive(st, head, from)) inline.push(Decoration.replace({}).range(from, to));
+        if (!nodeActive()) inline.push(Decoration.replace({}).range(from, to));
       };
 
       if (
@@ -241,7 +249,69 @@ function buildMdDecos(view) {
     },
   });
 
+  // 行内 HTML（下划线/荧光笔/字号）：标签按节点级隐藏，效果常显（单行内有效）
+  try {
+    for (let i = 1; i <= st.doc.lines; i++) {
+      const line = st.doc.line(i);
+      if (!line.length) continue;
+      scanInlineHtml(line, head, inline);
+    }
+  } catch {
+    // 单个异常不拖垮整个实时渲染
+  }
+
   return Decoration.set(lineDecos.concat(inline), true);
+}
+
+function scanInlineHtml(line, head, out) {
+  // 标签隐藏采用节点级判定：光标在该片段范围内才显示源码标签，否则隐藏、效果常显
+  const tagVisible = (from, to) => head >= from && head <= to;
+  let m;
+
+  const RE_U = /<u>([^<]*)<\/u>/g;
+  for (m of line.text.matchAll(RE_U)) {
+    const openFrom = line.from + m.index;
+    const contentFrom = openFrom + 3;
+    const contentTo = contentFrom + m[1].length;
+    const closeTo = contentTo + 4;
+    if (!tagVisible(openFrom, closeTo)) {
+      out.push(Decoration.replace({}).range(openFrom, contentFrom));
+      out.push(Decoration.replace({}).range(contentTo, closeTo));
+    }
+    out.push(Decoration.mark({ class: 'cm-u' }).range(contentFrom, contentTo));
+  }
+
+  const RE_MARK = /<mark>([^<]*)<\/mark>/g;
+  for (m of line.text.matchAll(RE_MARK)) {
+    const openFrom = line.from + m.index;
+    const contentFrom = openFrom + 6;
+    const contentTo = contentFrom + m[1].length;
+    const closeTo = contentTo + 7;
+    if (!tagVisible(openFrom, closeTo)) {
+      out.push(Decoration.replace({}).range(openFrom, contentFrom));
+      out.push(Decoration.replace({}).range(contentTo, closeTo));
+    }
+    out.push(Decoration.mark({ class: 'cm-highlight' }).range(contentFrom, contentTo));
+  }
+
+  const RE_FS = /<span style="font-size:(\d+)px">([^<]*)<\/span>/g;
+  for (m of line.text.matchAll(RE_FS)) {
+    const openFrom = line.from + m.index;
+    const openTo = openFrom + m[0].indexOf('>') + 1;
+    const contentFrom = openTo;
+    const contentTo = contentFrom + m[2].length;
+    const closeTo = contentTo + 7;
+    if (!tagVisible(openFrom, closeTo)) {
+      out.push(Decoration.replace({}).range(openFrom, openTo));
+      out.push(Decoration.replace({}).range(contentTo, closeTo));
+    }
+    out.push(
+      Decoration.mark({ class: 'cm-fs', attributes: { style: 'font-size:' + m[1] + 'px' } }).range(
+        contentFrom,
+        contentTo
+      )
+    );
+  }
 }
 
 function buildCardDecos(view) {
@@ -675,10 +745,21 @@ const view = new EditorView({
           view.dispatch(view.state.replaceSelection(fenced));
           return true;
         },
+        contextmenu(event) {
+          const sel = view.state.selection.main;
+          if (sel.empty) return false;
+          event.preventDefault();
+          showCtxMenu(event.clientX, event.clientY);
+          return true;
+        },
         keydown(event) {
           if (event.isComposing || event.keyCode === 229) return false;
           if (settingsOpen && event.key === 'Escape') {
             closeSettings();
+            return true;
+          }
+          if (ctxOpen && event.key === 'Escape') {
+            hideCtx();
             return true;
           }
           if (modalOpen && event.key === 'Escape') {
@@ -705,6 +786,16 @@ const view = new EditorView({
             confirmDelete({ path: currentFile });
             return true;
           }
+          if (event.ctrlKey && !event.altKey && !event.metaKey && (event.key === '=' || event.key === '+')) {
+            event.preventDefault();
+            stepFontSize(1);
+            return true;
+          }
+          if (event.ctrlKey && !event.altKey && !event.metaKey && (event.key === '-' || event.key === '_')) {
+            event.preventDefault();
+            stepFontSize(-1);
+            return true;
+          }
           if (event.ctrlKey && !event.altKey && (event.key === 's' || event.key === 'S')) {
             flushAndSend();
             return true;
@@ -718,6 +809,7 @@ const view = new EditorView({
           clearTimeout(saveTimer);
           saveTimer = setTimeout(saveNow, 600);
         }
+        if (u.selectionSet) hideCtx();
         handleSlashUpdate(u);
       }),
     ],
@@ -1006,6 +1098,198 @@ window.addEventListener(
   true
 );
 
+// ---------- 选中文字右键格式菜单 ----------
+
+const ctxMenu = document.createElement('div');
+ctxMenu.id = 'ctx-menu';
+ctxMenu.style.display = 'none';
+editorHost.appendChild(ctxMenu);
+
+let ctxOpen = false;
+let ctxSel = null; // {from, to} 打开菜单时的选区
+
+function hideCtx() {
+  if (!ctxOpen) return;
+  ctxOpen = false;
+  ctxMenu.style.display = 'none';
+  ctxMenu.textContent = '';
+  ctxSel = null;
+}
+
+// 判断选区是否已被 open/close 包裹（含选区内部自带记号两种情况）
+function wrapState(sel, open, close) {
+  const doc = view.state.doc;
+  const text = doc.sliceString(sel.from, sel.to);
+  if (
+    text.length >= open.length + close.length &&
+    text.startsWith(open) && text.endsWith(close)
+  ) {
+    return 'inner';
+  }
+  const before = doc.sliceString(Math.max(0, sel.from - open.length), sel.from);
+  const after = doc.sliceString(sel.to, Math.min(doc.length, sel.to + close.length));
+  if (before === open && after === close) return 'outer';
+  return null;
+}
+
+// 包裹/取消包裹；返回新的选区范围
+function applyWrap(open, close) {
+  const sel = ctxSel || view.state.selection.main;
+  const mode = wrapState(sel, open, close);
+  let changes;
+  let anchor;
+  let head;
+  if (mode === 'inner') {
+    changes = [
+      { from: sel.from, to: sel.from + open.length },
+      { from: sel.to - close.length, to: sel.to },
+    ];
+    anchor = sel.from;
+    head = sel.to - open.length - close.length;
+  } else if (mode === 'outer') {
+    changes = [
+      { from: sel.from - open.length, to: sel.from },
+      { from: sel.to, to: sel.to + close.length },
+    ];
+    anchor = sel.from - open.length;
+    head = sel.to - open.length;
+  } else {
+    changes = [
+      { from: sel.from, insert: open },
+      { from: sel.to, insert: close },
+    ];
+    anchor = sel.from + open.length;
+    head = sel.to + open.length;
+  }
+  view.dispatch({ changes, selection: { anchor, head }, userEvent: 'input.wrap' });
+  view.focus();
+}
+
+const FONT_SIZES = [12, 14, 16, 18, 20, 24];
+
+function applyFontSize(px) {
+  const sel = ctxSel || view.state.selection.main;
+  const open = '<span style="font-size:' + px + 'px">';
+  view.dispatch({
+    changes: [
+      { from: sel.from, insert: open },
+      { from: sel.to, insert: '</span>' },
+    ],
+    selection: { anchor: sel.from + open.length, head: sel.to + open.length },
+    userEvent: 'input.wrap',
+  });
+  view.focus();
+}
+
+// Ctrl+= / Ctrl+-：有选区时步进选区字号（±2px，10–28）；无选区时调整全局正文字号（14–18）
+function stepFontSize(dir) {
+  const sel = view.state.selection.main;
+  if (sel.empty) {
+    const next = Math.min(18, Math.max(14, uiSettings.fontSize + dir));
+    if (next !== uiSettings.fontSize) bridge.setSetting('fontSize', next);
+    return;
+  }
+  // 检测选区是否已被字号 span 包裹
+  const doc = view.state.doc;
+  const before = doc.sliceString(Math.max(0, sel.from - 40), sel.from);
+  const m = before.match(/<span style="font-size:(\d+)px">$/);
+  const wrapped = !!(m && doc.sliceString(sel.to, Math.min(doc.length, sel.to + 7)) === '</span>');
+  const cur = wrapped ? Number(m[1]) : uiSettings.fontSize;
+  const next = Math.min(28, Math.max(10, cur + dir * 2));
+  const open = '<span style="font-size:' + next + 'px">';
+
+  // 变更按位置升序提交（CodeMirror 要求），只替换标签本身、内容不动
+  const changes = [];
+  if (wrapped) {
+    const spanStart = sel.from - ('<span style="font-size:' + m[1] + 'px">').length;
+    const spanEnd = sel.to + 7;
+    changes.push({ from: spanStart, to: spanStart + ('<span style="font-size:' + m[1] + 'px">').length, insert: open });
+    changes.push({ from: spanEnd - 7, to: spanEnd });
+  } else {
+    changes.push({ from: sel.from, insert: open });
+    changes.push({ from: sel.to, insert: '</span>' });
+  }
+  view.dispatch({
+    changes,
+    selection: { anchor: sel.from + open.length, head: sel.to + open.length },
+    userEvent: 'input.wrap',
+  });
+}
+
+function ctxRow(label, hint, run, keepOpen) {
+  const row = document.createElement('div');
+  row.className = 'ctx-item';
+  const l = document.createElement('span');
+  l.textContent = label;
+  row.appendChild(l);
+  if (hint) {
+    const h = document.createElement('span');
+    h.className = 'slash-hint';
+    h.textContent = hint;
+    row.appendChild(h);
+  }
+  row.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    run();
+    if (!keepOpen) hideCtx();
+  });
+  return row;
+}
+
+function renderCtxMenu(page) {
+  ctxMenu.textContent = '';
+  if (page === 'size') {
+    ctxMenu.appendChild(ctxRow('← 返回', 'Esc', () => renderCtxMenu('main'), true));
+    for (const px of FONT_SIZES) {
+      ctxMenu.appendChild(ctxRow(px + ' px', '', () => applyFontSize(px)));
+    }
+    return;
+  }
+  const sel = ctxSel;
+  ctxMenu.appendChild(
+    ctxRow(wrapState(sel, '**', '**') ? '取消加粗' : '加粗', 'Ctrl+B', () => applyWrap('**', '**'))
+  );
+  ctxMenu.appendChild(
+    ctxRow(wrapState(sel, '*', '*') ? '取消斜体' : '斜体', 'Ctrl+I', () => applyWrap('*', '*'))
+  );
+  ctxMenu.appendChild(ctxRow('调整字号', 'Ctrl+±', () => renderCtxMenu('size'), true));
+  ctxMenu.appendChild(
+    ctxRow(wrapState(sel, '<u>', '</u>') ? '取消下划线' : '下划线', '', () => applyWrap('<u>', '</u>'))
+  );
+  ctxMenu.appendChild(
+    ctxRow(wrapState(sel, '<mark>', '</mark>') ? '取消荧光笔' : '荧光笔', '', () => applyWrap('<mark>', '</mark>'))
+  );
+  ctxMenu.appendChild(
+    ctxRow(wrapState(sel, '`', '`') ? '取消行内代码' : '转换为代码', '', () => applyWrap('`', '`'))
+  );
+}
+
+function showCtxMenu(x, y) {
+  const sel = view.state.selection.main;
+  if (sel.empty) return;
+  ctxSel = { from: sel.from, to: sel.to };
+  renderCtxMenu('main');
+  ctxMenu.style.display = 'block';
+  ctxOpen = true;
+  const host = editorHost.getBoundingClientRect();
+  let left = x - host.left;
+  let top = y - host.top + 4;
+  if (left + ctxMenu.offsetWidth > host.width - 8) left = host.width - ctxMenu.offsetWidth - 8;
+  if (top + ctxMenu.offsetHeight > host.height - 8) top = y - host.top - ctxMenu.offsetHeight - 4;
+  ctxMenu.style.left = Math.max(8, left) + 'px';
+  ctxMenu.style.top = Math.max(8, top) + 'px';
+}
+
+// 点击菜单外部 / 滚动 / 选区变化时收起
+window.addEventListener(
+  'mousedown',
+  (e) => {
+    if (ctxOpen && e.button !== 2 && !ctxMenu.contains(e.target)) hideCtx();
+  },
+  true
+);
+view.scrollDOM.addEventListener('scroll', hideCtx, true);
+
 // ---------- 侧栏文档列表 ----------
 
 function formatDate(ms) {
@@ -1149,13 +1433,24 @@ bridge.onRestore(({ text, caret, file }) => {
 if (location.search.indexOf('diag') !== -1) {
   (async () => {
     const sample =
-      '# 标题\n\n```cpp\n#include <iostream>\nusing namespace std;\nint main() {\n  std::cout << "hi" << x;\n}\n```\n\n```\nbare fence line\n```\n';
+      '# 标题\n\n正文 <span style="font-size:24px">132</span> 尾巴\n<u>下划线文字</u> <mark>荧光文字</mark>\n\n```cpp\n#include <iostream>\nusing namespace std;\nint main() {\n  std::cout << "hi" << x;\n}\n```\n';
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: sample } });
+    view.dispatch({ selection: { anchor: 0 } }); // 光标移到文档开头，所有标签应隐藏
     await new Promise((r) => setTimeout(r, 1500)); // 等嵌套语言懒加载
+    let buildErr = null;
+    try {
+      buildMdDecos(view);
+    } catch (e) {
+      buildErr = e && e.message ? e.message : String(e);
+    }
     const counts = {};
-    for (const c of ['cm-line','cm-content','tok-kw','tok-kw2','tok-fn','tok-var','tok-type','tok-str','tok-mark','cm-code-line','cm-ln','cm-lang','tok-lang']) {
+    for (const c of ['cm-line','cm-content','cm-fs','cm-u','cm-highlight','tok-kw','tok-kw2','tok-fn','tok-var','tok-type','tok-str','tok-mark','cm-code-line','cm-ln','cm-lang','tok-lang']) {
       counts[c] = document.querySelectorAll('.' + c).length;
     }
+    // 检查行内 HTML 标签是否仍以文本形式出现在渲染 DOM 中（应全部隐藏）
+    const tagVisible = Array.from(document.querySelectorAll('.cm-line')).some(
+      (l) => l.textContent.includes('<span') || l.textContent.includes('<u>') || l.textContent.includes('<mark>')
+    );
     const colorOf = (sel) => {
       const el = document.querySelector(sel);
       return el ? getComputedStyle(el).color : 'none';
@@ -1165,12 +1460,15 @@ if (location.search.indexOf('diag') !== -1) {
       texts[c] = Array.from(document.querySelectorAll('.' + c)).map((e) => e.textContent).slice(0, 6);
     }
     window.__diagResult = JSON.stringify({
+      buildErr,
       docLength: view.state.doc.length,
       docLines: view.state.doc.lines,
       counts,
+      tagVisible,
       kw2Color: colorOf('.tok-kw2'),
       fnColor: colorOf('.tok-fn'),
       varColor: colorOf('.tok-var'),
+      fsColor: colorOf('.cm-fs'),
       bodyClass: document.body.className,
       texts,
     });
