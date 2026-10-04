@@ -53,6 +53,7 @@ const DEFAULT_SETTINGS = {
   lineNumbers: true,
   indentDots: true,
   alwaysOnTop: true,
+  reviewMode: 'daily', // off | daily | always
 };
 const settings = {};
 for (const k of Object.keys(DEFAULT_SETTINGS)) {
@@ -199,7 +200,17 @@ function createWindow() {
     console.log('[win-visibility] send', visible);
     win.webContents.send('win-visibility', visible);
   };
-  win.on('show', sendVis);
+  // 每日回顾：呼出时按当前设置推一条旧笔记（没有可回顾的内容时不消耗当天名额）
+  const sendReview = () => {
+    const note = maybeAutoReview();
+    if (!note) return;
+    const send = () => win.webContents.send('review', note);
+    pageReady ? send() : win.webContents.once('did-finish-load', send);
+  };
+  win.on('show', () => {
+    sendVis();
+    sendReview();
+  });
   win.on('hide', sendVis);
   win.webContents.on('did-finish-load', () => {
     pageReady = true;
@@ -533,6 +544,13 @@ ipcMain.handle('set-setting', (_e, { key, value }) => {
       win.webContents.send('settings-changed', settings);
       return { ok: true };
     }
+    case 'reviewMode': {
+      if (!['off', 'daily', 'always'].includes(value)) return { ok: false };
+      settings.reviewMode = value;
+      persistConfig();
+      win.webContents.send('settings-changed', settings);
+      return { ok: true };
+    }
     default:
       return { ok: false };
   }
@@ -798,5 +816,159 @@ ipcMain.handle('open-page-at', async (_e, payload) => {
   const carets = { ...(st.carets || {}), [file]: caret };
   saveState({ ...st, file, caret, carets });
   sendRestore(text, caret, file);
+  return { ok: true };
+});
+
+// ---------- 每日回顾 ----------
+//
+// 关键资产：文件名就是创建时间（YYYY-MM-DD_HH-mm-ss.md），所以按「几年前的今天」筛选
+// 完全不用读全文、不建索引、不联网。回看历史笔记必须按创建日期而不是 mtime——
+// 改一下去年的笔记 mtime 就变新了，用它筛会让旧笔记"变年轻"。
+
+const REVIEW_MIN_AGE_DAYS = 7; // 太新的笔记不值得回顾
+const REVIEW_COOLDOWN_DAYS = 30; // 刚回顾过的先放一放
+// 凌晨 4 点前算前一天：速记用户常熬夜，半夜写的笔记不该立刻被踢出回顾池
+const REVIEW_DAY_CUTOFF_HOUR = 4;
+
+const loadReviews = () => readJson(userDataFile('reviews.json'), { notes: {}, lastShown: '' });
+const saveReviews = (r) => writeJson(userDataFile('reviews.json'), r);
+
+function noteCreatedAt(name) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/.exec(name);
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+const dayKey = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+function logicalToday(now) {
+  const d = new Date(now);
+  if (d.getHours() < REVIEW_DAY_CUTOFF_HOUR) d.setDate(d.getDate() - 1);
+  return dayStart(d);
+}
+
+const monthDistance = (from, to) =>
+  (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
+
+function reviewAgeLabel(created, today, ageDays) {
+  const sameDay = created.getMonth() === today.getMonth() && created.getDate() === today.getDate();
+  const years = today.getFullYear() - created.getFullYear();
+  if (sameDay && years >= 1) return years + ' 年前的今天';
+  const months = monthDistance(created, today);
+  if (sameDay && months >= 3 && months % 3 === 0) return months + ' 个月前的今天';
+  if (ageDays < 30) return ageDays + ' 天前';
+  if (months < 12) return months + ' 个月前';
+  return years + ' 年前';
+}
+
+// 回顾卡片里的摘要是纯文本：Markdown 渲染是挂在 CodeMirror decoration 上的，
+// 脱离编辑器复用不了，所以这里只剥掉常见记号，不重造一套渲染器。
+function reviewExcerpt(text) {
+  const lines = String(text || '').split('\n');
+  const body = [];
+  let len = 0;
+  for (const raw of lines.slice(1)) {
+    if (/^\s*```/.test(raw)) continue;
+    const line = raw
+      .replace(/^\s{0,3}#{1,6}\s*/, '')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/[*_`>]/g, '')
+      .trim();
+    if (!line) continue;
+    body.push(line);
+    len += line.length;
+    if (len > 220) break;
+  }
+  const out = body.join('\n').trim();
+  if (out) return out.slice(0, 260);
+  return lines[0].replace(/^#{1,6}\s*/, '').trim().slice(0, 80);
+}
+
+function pickReviewNote(exclude, nowMs) {
+  const now = new Date(nowMs || Date.now());
+  const today = logicalToday(now);
+  const reviews = loadReviews();
+  const excluded = new Set((Array.isArray(exclude) ? exclude : []).map((f) => path.basename(String(f))));
+  const pool = [];
+  eachNote((file, text) => {
+    const created = noteCreatedAt(path.basename(file));
+    if (!created) return;
+    const ageDays = Math.round((today - dayStart(created)) / 86400000);
+    if (ageDays < REVIEW_MIN_AGE_DAYS) return;
+    pool.push({ file, text, created, ageDays });
+  });
+  if (!pool.length) return null;
+
+  // 分档：往年同月同日 > 3/6/9 个月前的今天 > 很久没回顾的 > 全部
+  const sameDayPast = pool.filter(
+    (n) => n.created.getMonth() === today.getMonth() && n.created.getDate() === today.getDate() && n.created.getFullYear() < today.getFullYear()
+  );
+  const quarterPast = pool.filter((n) => {
+    const m = monthDistance(n.created, today);
+    return n.created.getDate() === today.getDate() && m >= 3 && m % 3 === 0 && n.created.getFullYear() === today.getFullYear();
+  });
+  const notRecent = pool.filter((n) => {
+    const at = reviews.notes[path.basename(n.file)] || 0;
+    return !at || now.getTime() - at > REVIEW_COOLDOWN_DAYS * 86400000;
+  });
+  // 按档位顺序取：同档内以"今天是第几天"为随机起点（一天内结果稳定）；
+  // 档内被 exclude 光了（点「换一条」点到底）要落到下一档，而不是直接返回空。
+  const seed = Math.floor(today.getTime() / 86400000);
+  const pickFrom = (list) => {
+    if (!list.length) return null;
+    const start = seed % list.length;
+    for (let i = 0; i < list.length; i++) {
+      const cand = list[(start + i) % list.length];
+      if (!excluded.has(path.basename(cand.file))) return cand;
+    }
+    return null;
+  };
+  let pick = null;
+  for (const list of [sameDayPast, quarterPast, notRecent, pool]) {
+    pick = pickFrom(list);
+    if (pick) break;
+  }
+  if (!pick) return null;
+  return {
+    file: pick.file,
+    title: pageTitle(pick.file) || path.basename(pick.file, '.md'),
+    excerpt: reviewExcerpt(pick.text),
+    label: reviewAgeLabel(pick.created, today, pick.ageDays),
+    ageDays: pick.ageDays,
+    created: pick.created.getTime(),
+    date: dayKey(pick.created),
+  };
+}
+
+// 每天只自动推一次；没有可回顾的内容时不消耗当天名额
+function maybeAutoReview() {
+  if (settings.reviewMode === 'off') return null;
+  const today = logicalToday(new Date());
+  const reviews = loadReviews();
+  if (settings.reviewMode === 'daily' && reviews.lastShown === dayKey(today)) return null;
+  const note = pickReviewNote([]);
+  if (!note) return null;
+  reviews.lastShown = dayKey(today);
+  reviews.notes[path.basename(note.file)] = Date.now();
+  saveReviews(reviews);
+  return note;
+}
+
+ipcMain.handle('review-note', (_e, payload) => ({
+  ok: true,
+  note: pickReviewNote((payload && payload.exclude) || []),
+}));
+
+ipcMain.handle('review-dismiss', (_e, payload) => {
+  const file = safePagePath(payload && payload.path);
+  if (file) {
+    const reviews = loadReviews();
+    reviews.notes[path.basename(file)] = Date.now();
+    saveReviews(reviews);
+  }
   return { ok: true };
 });

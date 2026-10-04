@@ -14,6 +14,7 @@ function gate() {
     window: {}, console: { debug() {} },
     view: { state: { selection: {} }, dispatch() {} },
     bridge: { onVisibility(cb) { visibility = cb; } },
+    hideReview() {}, // 可视性处理器顺带收起每日回顾，门控测试不关心它
     setTimeout(fn, ms) { const key = ++id; timers.set(key, { at: time + ms, fn }); return key; },
     clearTimeout(key) { timers.delete(key); },
     requestAnimationFrame(fn) { const key = ++id; frames.set(key, fn); return key; },

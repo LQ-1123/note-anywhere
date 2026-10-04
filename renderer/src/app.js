@@ -1406,6 +1406,7 @@ if (bridge.onVisibility) {
       cancelTableRenderWait();
       tableRenderOk = window.__tableRenderOk = false;
       window.__tableRenderState = { visible: false, ready: false, reason: 'hidden' };
+      hideReview(); // 下次呼出重新判定要不要推回顾
       // 隐藏时不触发测量；装饰在下一次可见时重建。
     }
   });
@@ -1983,6 +1984,8 @@ const view = new EditorView({
       })),
       EditorView.updateListener.of((u) => {
         if (u.docChanged) {
+          // 开始打字就收起回顾横幅：它是唤起记忆用的，不该挡着你写
+          if (u.transactions.some((tr) => tr.isUserEvent('input') || tr.isUserEvent('delete'))) hideReview();
           renderTitle();
           clearTimeout(saveTimer);
           saveTimer = setTimeout(saveNow, 600);
@@ -2157,6 +2160,7 @@ function fillSettings(s) {
   document.getElementById('set-linenumbers').checked = s.lineNumbers !== false;
   document.getElementById('set-indentdots').checked = s.indentDots !== false;
   document.getElementById('set-alwaysontop').checked = s.alwaysOnTop !== false;
+  segSet('set-reviewmode', s.reviewMode || 'daily');
   document.getElementById('set-version').textContent = 'NoteAnywhere v' + s.version;
 }
 
@@ -2257,6 +2261,11 @@ document.getElementById('set-tabwidth').addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   bridge.setSetting('tabWidth', Number(b.dataset.v)).then((r) => r && r.ok && segSet('set-tabwidth', b.dataset.v));
+});
+document.getElementById('set-reviewmode').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  bridge.setSetting('reviewMode', b.dataset.v).then((r) => r && r.ok && segSet('set-reviewmode', b.dataset.v));
 });
 
 // 开关类
@@ -2962,6 +2971,58 @@ function renderTags(tags) {
     tagListEl.appendChild(item);
   }
 }
+
+// ---------- 每日回顾 ----------
+
+const reviewEl = document.getElementById('review');
+const reviewLabelEl = document.getElementById('review-label');
+const reviewDateEl = document.getElementById('review-date');
+const reviewTextEl = document.getElementById('review-text');
+
+const review = { note: null, shown: [] };
+
+function hideReview() {
+  if (reviewEl.hidden) return;
+  reviewEl.hidden = true;
+  const note = review.note;
+  review.note = null;
+  if (note) bridge.reviewDismiss(note.file); // 记一笔，避免很快又推同一篇
+}
+
+function showReview(note) {
+  if (!note || !note.file) return;
+  const prev = review.note;
+  if (prev && prev.file !== note.file) bridge.reviewDismiss(prev.file);
+  review.note = note;
+  if (!review.shown.includes(note.file)) review.shown.push(note.file);
+  reviewLabelEl.textContent = note.label || '旧笔记';
+  reviewDateEl.textContent = (note.title ? note.title + ' · ' : '') + (note.date || '');
+  reviewTextEl.textContent = note.excerpt || '';
+  reviewEl.hidden = false;
+}
+
+document.getElementById('review-open').addEventListener('click', async () => {
+  const note = review.note;
+  if (!note) return;
+  reviewEl.hidden = true; // 打开原页本身就说明看过，不必再记一次
+  review.note = null;
+  try {
+    await bridge.openPage(note.file);
+  } catch {}
+});
+
+document.getElementById('review-next').addEventListener('click', async () => {
+  let res = null;
+  try {
+    res = await bridge.reviewNote(review.shown);
+  } catch {}
+  if (res && res.ok && res.note) showReview(res.note);
+  else hideReview(); // 没有别的可回顾了
+});
+
+document.getElementById('review-close').addEventListener('click', hideReview);
+
+if (bridge.onReview) bridge.onReview(showReview);
 
 // ---------- 恢复页面（呼出/切换/新建） ----------
 

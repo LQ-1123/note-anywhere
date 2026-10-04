@@ -532,6 +532,46 @@ app.whenReady().then(async () => {
       await read('document.getElementById("search-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
       await until('document.getElementById("search-mask").hidden === true', 'Esc did not close search');
     });
+    // ---------- 每日回顾 ----------
+    await check('daily review surfaces an old note, falls back a tier, and typing dismisses it', async () => {
+      const notesDir = path.join(app.getPath('userData'), 'notes');
+      const pad = (n) => String(n).padStart(2, '0');
+      const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      const y1 = new Date();
+      y1.setFullYear(y1.getFullYear() - 1); // 一年前的今天 → 第一档
+      const y2 = new Date();
+      y2.setDate(y2.getDate() - 40); // 40 天前 → 兜底档
+      const today = new Date();
+      fs.mkdirSync(notesDir, { recursive: true });
+      fs.writeFileSync(path.join(notesDir, `${ymd(y1)}_09-00-00.md`), '# 并发写的风险\n\n我觉得这个方案的风险在于**并发写**。', 'utf8');
+      fs.writeFileSync(path.join(notesDir, `${ymd(y2)}_09-00-00.md`), '# 另一次记录\n\n今天试了下别的。', 'utf8');
+      fs.writeFileSync(path.join(notesDir, `${ymd(today)}_08-00-00.md`), '# 刚刚写的\n\n不该被回顾。', 'utf8');
+
+      // 收起再呼出 → 主进程按设置推一条回顾
+      await read('window.bridge.hide()');
+      for (let i = 0; i < 40 && win.isVisible(); i++) await delay(40);
+      win.show();
+      win.focus();
+      await until('document.getElementById("review").hidden === false', 'review banner did not appear', 4000);
+      assert.equal(await read('document.getElementById("review-label").textContent'), '1 年前的今天', 'wrong tier picked');
+      assert.ok((await read('document.getElementById("review-text").textContent')).includes('并发写'), 'wrong review note body');
+      assert.ok((await read('document.getElementById("review-date").textContent')).includes(ymd(y1)), 'review source date missing');
+      assert.ok(!(await read('document.getElementById("review-text").textContent')).includes('**'), 'review excerpt kept markdown marks');
+
+      // 换一条：第一档被 exclude 后必须落到下一档，而不是直接收起
+      await mouse('#review-next');
+      await until('document.getElementById("review-text").textContent.includes("别的")', 'next review did not fall back to a lower tier', 4000);
+      assert.equal(await read('document.getElementById("review").hidden'), false, 'banner closed after 换一条');
+
+      // 开始打字 → 自动收起
+      await mouse('.cm-content');
+      await type('a');
+      await until('document.getElementById("review").hidden === true', 'typing did not dismiss the review', 3000);
+
+      // 今天写的笔记永远不进回顾池
+      const picked = await read('(async () => { const r = await window.bridge.reviewNote([]); return r.note ? r.note.file : ""; })()');
+      assert.ok(!String(picked).includes(ymd(today)), 'today note was picked for review: ' + picked);
+    });
     console.log('TABLE-OK');
     try { if (originalClipboard) require('electron').clipboard.writeText(originalClipboard); else require('electron').clipboard.clear(); } catch {}
     clearTimeout(watchdog);

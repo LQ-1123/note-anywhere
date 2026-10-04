@@ -34,6 +34,27 @@
         <input id="search-input" type="text" placeholder="搜索笔记" autocomplete="off" spellcheck="false" />
       </div>
     </header>
+
+    <!-- 每日回顾：呼出时顶部浮一条旧笔记，可直接往下写不受影响 -->
+    <div id="review" hidden>
+      <div id="review-head">
+        <span id="review-icon" aria-hidden="true">
+          <svg viewBox="0 0 16 16" width="11" height="11" focusable="false">
+            <circle cx="8" cy="8" r="6.1" fill="none" stroke="currentColor" stroke-width="1.4" />
+            <path d="M8 4.6V8l2.3 1.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </span>
+        <span id="review-label"></span>
+        <span id="review-date"></span>
+        <span id="review-actions">
+          <button id="review-open" class="review-btn">打开原页</button>
+          <button id="review-next" class="review-btn">换一条</button>
+          <button id="review-close" class="review-btn" title="收起">✕</button>
+        </span>
+      </div>
+      <div id="review-text"></div>
+    </div>
+
     <div id="editor"></div>
     <footer id="hint">
       <span>Alt+Q / Esc 收起并保存 · Alt+N 新建 · Alt+Del 删除本页</span>
@@ -66,6 +87,14 @@
           <div class="set-row">
             <span class="set-label">开机自启</span>
             <label class="switch"><input type="checkbox" id="set-autostart" /><span></span></label>
+          </div>
+          <div class="set-row">
+            <span class="set-label">每日回顾</span>
+            <div class="seg" id="set-reviewmode">
+              <button data-v="off">关闭</button>
+              <button data-v="daily">每天第一次</button>
+              <button data-v="always">每次呼出</button>
+            </div>
           </div>
           <div class="set-row col">
             <span class="set-label">笔记保存目录</span>
