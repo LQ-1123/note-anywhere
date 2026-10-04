@@ -91,6 +91,23 @@ class BulletWidget extends WidgetType {
   }
 }
 
+// 有序列表的显示记号。注意：Markdown 语法只有「数字.」一种有序列表记号，
+// a. / i. / 1.1. 都不是合法列表语法，所以多级编号只能做在显示层。
+const LIST_ROMAN = ['i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x', 'xi', 'xii'];
+class OrderedMarkWidget extends WidgetType {
+  constructor(text) {
+    super();
+    this.text = text;
+  }
+  eq(other) { return other.text === this.text; }
+  toDOM() {
+    const s = document.createElement('span');
+    s.className = 'cm-ol-marker';
+    s.textContent = this.text;
+    return s;
+  }
+}
+
 // 代码块行号
 class LnWidget extends WidgetType {
   constructor(n) {
@@ -1096,7 +1113,15 @@ function buildMdDecos(view) {
       }
       if (name === 'ListMark') {
         if (lineInactive(st, head, from)) {
-          inline.push(Decoration.replace({ widget: new BulletWidget() }).range(from, to));
+          const mark = st.doc.sliceString(from, to);
+          // 有序列表（1. / 1)）保留数字并做多级显示编号，不再一律画成 •
+          if (/^\d+[.)]$/.test(mark)) {
+            inline.push(
+              Decoration.replace({ widget: new OrderedMarkWidget(orderedListMarker(ref.node, mark)) }).range(from, to)
+            );
+          } else {
+            inline.push(Decoration.replace({ widget: new BulletWidget() }).range(from, to));
+          }
         }
         return;
       }
@@ -1274,7 +1299,8 @@ function buildCardDecos(view) {
           inline.push(Decoration.widget({ widget: new LnWidget(n++), side: -1 }).range(line.from));
         }
         // 非编辑行：前导缩进显示为圆点（一个 · = 一个 Tab 宽，保持列对齐）
-        if (uiSettings.indentDots && !lineActive) {
+        // 列表行除外：记号本身已表明层级，再画圆点会变成「· •」很乱
+        if (uiSettings.indentDots && !lineActive && !LIST_ITEM.test(line.text)) {
           const indent = (line.text.match(/^ */) || [''])[0].length;
           const tw = uiSettings.tabWidth;
           const levels = Math.floor(indent / tw);
@@ -1735,6 +1761,35 @@ function wrapMark(mark) {
 const LIST_ITEM = /^(\s*)([-*+]|\d+\.)(\s+)(.*)$/;
 const ORDERED_BULLET = /^(\d+)\.$/;
 
+// 有序列表项该显示什么记号：层级 0 用源码里的数字，层级 1 用 a./b.，
+// 层级 2 用 i./ii.，再深的层级循环回数字（与常见公文/大纲习惯一致）。
+// lezer 的树形是 OrderedList/BulletList > ListItem > ListMark，嵌套列表挂在 ListItem 里。
+function orderedListMarker(node, sourceMark) {
+  let item = node.parent;
+  while (item && item.name !== 'ListItem') item = item.parent;
+  if (!item) return sourceMark;
+  let depth = 0;
+  for (let n = item.parent; n; n = n.parent) {
+    if (n.name === 'OrderedList' || n.name === 'BulletList') depth++;
+  }
+  depth = Math.max(0, depth - 1);
+  const level = depth % 3;
+  if (level === 0) return sourceMark;
+  // 同级里的序号
+  let index = 0;
+  const parent = item.parent;
+  if (parent) {
+    for (let c = parent.firstChild; c; c = c.nextSibling) {
+      if (c.name === 'ListItem') {
+        if (c.from === item.from) break;
+        index++;
+      }
+    }
+  }
+  if (level === 1) return String.fromCharCode(97 + (index % 26)) + '.';
+  return (LIST_ROMAN[index] || String(index + 1)) + '.';
+}
+
 // 回车自动续写列表（- / * / 1.），空列表项回车退出列表
 function listContinuation(view) {
   if (view.composing) return false;
@@ -1769,7 +1824,7 @@ function listContinuation(view) {
   return true;
 }
 
-// Tab：固定插入一个缩进格（= Tab 宽度空格 = 一个 ·），光标随之移到空格后
+// Tab：列表行整项缩进（在项内任意位置按 Tab 都缩进整行），普通行插入一个缩进格
 function tabIndent(view) {
   if (view.composing) return false;
   const unit = ' '.repeat(uiSettings.tabWidth);
@@ -1785,8 +1840,12 @@ function tabIndent(view) {
     view.dispatch({ changes, userEvent: 'input.indent' });
     return true;
   }
+  // 列表项：缩进必须加在整行行首（记号之前）。否则光标停在文字中间时，
+  // 只会在光标处插入空格、记号和整项都不动 —— 用户就得先把光标移到记号前面。
+  const line = state.doc.lineAt(sel.from);
+  const from = LIST_ITEM.test(line.text) ? line.from : sel.from;
   view.dispatch({
-    changes: { from: sel.from, insert: unit },
+    changes: { from, insert: unit },
     selection: { anchor: sel.from + unit.length },
     userEvent: 'input.indent',
   });

@@ -397,6 +397,51 @@ app.whenReady().then(async () => {
       const scroll = await read('(() => { const el = document.querySelector(".cm-table-wrap"); const host = document.querySelector(".cm-content"); el.scrollLeft = 200; return {width: el.clientWidth, host: host.clientWidth, overflow: el.scrollWidth > el.clientWidth, moved: el.scrollLeft > 0}; })()');
       assert.ok(scroll.overflow && scroll.moved && scroll.width <= scroll.host, JSON.stringify(scroll));
     });
+    // ---------- 列表：多级编号渲染 + Tab 整项缩进（与表格共用同一套编辑器行为）----------
+    await check('nested ordered list shows 1. / a. / b. / i. and bullets stay bullets', async () => {
+      await mouse('#new-btn');
+      await paste([
+        '1. 一级一',
+        '   1. 二级一',
+        '   1. 二级二',
+        '      1. 三级一',
+        '2. 一级二',
+        '',
+        '- 无序一',
+        '   - 无序二',
+        '',
+        '结尾行',
+      ].join('\n'));
+      await delay(600);
+      await key('End', ['control']);
+      await delay(350);
+      const marks = await read('Array.from(document.querySelectorAll(".cm-ol-marker")).map(e => e.textContent)');
+      assert.deepEqual(marks, ['1.', 'a.', 'b.', 'i.', '2.'], 'nested numbering: ' + JSON.stringify(marks));
+      assert.equal(await read('document.querySelectorAll(".cm-bullet").length'), 2, 'bullets replaced by numbers');
+      assert.equal(await read('document.querySelectorAll(".cm-dot").length'), 0, 'indent dots drawn on list lines');
+    });
+    await check('Tab indents the whole list item from anywhere in the line', async () => {
+      await mouse('#new-btn');
+      await type('- abc');
+      await key('End'); // 光标停在文字末尾，而不是记号前面
+      await key('Tab');
+      await delay(300);
+      let text = (await snapshot()).t;
+      assert.ok(/^ {2,}-\s+abc$/.test(text), 'Tab did not indent the item: ' + JSON.stringify(text));
+      await key('Tab', ['shift']);
+      await delay(300);
+      text = (await snapshot()).t;
+      assert.ok(/^- abc$/.test(text), 'Shift+Tab did not dedent: ' + JSON.stringify(text));
+    });
+    await check('ordered list keeps numbering on Enter', async () => {
+      await mouse('#new-btn');
+      await type('1. abc');
+      await key('End');
+      await key('Enter');
+      await delay(300);
+      const text = (await snapshot()).t;
+      assert.ok(/^1\. abc\n2\. $/.test(text), 'Enter did not continue numbering: ' + JSON.stringify(text));
+    });
     console.log('TABLE-OK');
     try { if (originalClipboard) require('electron').clipboard.writeText(originalClipboard); else require('electron').clipboard.clear(); } catch {}
     clearTimeout(watchdog);
