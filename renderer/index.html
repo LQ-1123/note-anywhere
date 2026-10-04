@@ -181,6 +181,8 @@
     </div>
   </div>
 
+  <!-- Tauri 版桥接垫片：Electron 下 preload 已注入 window.bridge，本文件会自动跳过 -->
+  <script src="bridge-tauri.js"></script>
   <script src="app.bundle.js"></script>
 </body>
 </html>

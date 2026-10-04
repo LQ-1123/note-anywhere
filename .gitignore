@@ -3,3 +3,7 @@ dist/
 .mimosa/
 renderer/app.bundle.js
 *.log
+# Tauri / Rust
+src-tauri/target/
+src-tauri/gen/
+.tauri-test-notes/

@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "NoteAnywhere 主窗口权限。前端只用到事件订阅（listen），其余能力都走自定义命令，所以这里只放开 core 与 event。",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:event:default"]
+}

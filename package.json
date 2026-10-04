@@ -13,7 +13,9 @@
     "diag": "npm run bundle && electron tools/smoke-bootstrap.js --smoke --diag",
     "test:tables": "node --test tools/table-gate.test.cjs && npm run bundle && electron tools/table-regression.js",
     "icon": "node tools/gen-icon.js",
-    "dist": "npm run bundle && electron-builder"
+    "dist": "npm run bundle && electron-builder",
+    "tauri:build": "npm run bundle && cargo build --release --manifest-path src-tauri/Cargo.toml",
+    "tauri:run": "npm run tauri:build && start \"\" src-tauri\\target\\release\\noteanywhere.exe"
   },
   "devDependencies": {
     "@codemirror/lang-markdown": "^6.0.0",
