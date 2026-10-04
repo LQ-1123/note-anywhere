@@ -1497,6 +1497,18 @@ function filterSlash() {
   renderSlash();
 }
 
+// 输入法的拼音分音节撇号会混进查询词（真实事件日志里能看到 "b'f"→"bf"），
+// 匹配前一律剥掉，否则菜单会在组合中途被误关。
+const slashQueryOf = (text) => String(text || '').replace(/['\u2019]/g, '');
+
+// 查询词「整词」命中某个条目的英文别名时才返回该条目。
+// 必须是整词而不是子串：输入 /b 时不能误插，输入 /bg 才插。
+function slashItemForExactAlias(query) {
+  const q = slashQueryOf(query).trim().toLowerCase();
+  if (!q) return null;
+  return buildSnippets().find((it) => it.alias.toLowerCase().split(/\s+/).includes(q)) || null;
+}
+
 function renderSlash() {
   slashMenu.textContent = '';
   slash.items.forEach((it, i) => {
@@ -1623,27 +1635,33 @@ editorHost.addEventListener('keydown', (event) => {
   slash.pendingConfirm = Date.now();
 }, true);
 
-// 组合结束后按当前文档重新核对查询词，仍匹配才确认，避免误插
-function confirmSlashAfterComposition() {
+// 组合结束后按当前文档重新核对查询词，仍匹配才确认，避免误插。
+// fromKeydown：上屏前收到过明确的确认键（keydown 先、compositionend 后的引擎顺序）。
+// 真实中文输入法（实测 Windows 微软拼音）的顺序是 compositionend 在前，紧随其后的那次
+// 按键 key='Process'、keyCode=229、isComposing=false，无法辨认是回车还是空格，
+// 所以只能靠「查询词整词命中英文别名」来判定，例如 /bg。
+function confirmSlashAfterComposition(fromKeydown) {
   if (!slash.open || !slash.items.length) return;
   const head = view.state.selection.main.head;
   if (head <= slash.anchor) { closeSlash(); return; }
-  const q = view.state.doc.sliceString(slash.anchor + 1, head);
+  const q = slashQueryOf(view.state.doc.sliceString(slash.anchor + 1, head));
   if (/[\s/]/.test(q) || q.length > 20) { closeSlash(); return; }
   if (q !== slash.query) {
     slash.query = q;
     filterSlash();
     if (!slash.open || !slash.items.length) return;
   }
-  applySnippet(slash.items[slash.selected]);
+  const exact = slashItemForExactAlias(q);
+  if (!fromKeydown && !exact) return;
+  applySnippet(exact || slash.items[slash.selected]);
 }
 
 document.addEventListener('compositionend', () => {
   const at = slash.pendingConfirm;
   slash.pendingConfirm = 0;
-  if (!at || Date.now() - at > SLASH_IME_CONFIRM_MS) return;
+  const fromKeydown = !!(at && Date.now() - at <= SLASH_IME_CONFIRM_MS);
   // 让 CodeMirror 先把上屏文本并入文档，再按最新文档确认
-  setTimeout(confirmSlashAfterComposition, 0);
+  setTimeout(() => confirmSlashAfterComposition(fromKeydown), 0);
 });
 
 function handleSlashUpdate(u) {
@@ -1668,12 +1686,12 @@ function handleSlashUpdate(u) {
     closeSlash();
     return;
   }
-  const q = u.state.doc.sliceString(slash.anchor + 1, head);
-  if (/[\s/]/.test(q) || q.length > 20) {
+  const raw = u.state.doc.sliceString(slash.anchor + 1, head);
+  if (/[\s/]/.test(raw) || raw.length > 20) {
     closeSlash();
     return;
   }
-  slash.query = q;
+  slash.query = slashQueryOf(raw);
   filterSlash();
 }
 

@@ -158,6 +158,67 @@ app.whenReady().then(async () => {
       await mouse('#new-btn');
       await until('document.querySelectorAll(".cm-table-wrap").length === 0', 'new page after IME space case');
     });
+    // 真实中文输入法的事件顺序（实测自 Windows 微软拼音 + WebView2 事件日志）：
+    //   compositionend 先到，紧随其后的那次 keydown 是 key='Process'、keyCode=229、isComposing=false，
+    //   无法辨认是回车还是空格；并且 preedit 里会混入分音节撇号（"b'g"）。
+    // 所以确认不能只认 keydown『回车』，必须在 compositionend 时按「整词命中英文别名」判定。
+    await check('IME commit order: compositionend first, apostrophe in preedit', async () => {
+      await mouse('.cm-content');
+      await type('/');
+      win.webContents.debugger.attach('1.3');
+      try {
+        await win.webContents.debugger.sendCommand('Input.imeSetComposition', {
+          text: 'b', selectionStart: 1, selectionEnd: 1,
+        });
+        await delay(150);
+        assert.equal(
+          await read('document.querySelector("#slash-menu").style.display'), 'block',
+          'menu closed while composing "b"'
+        );
+        await win.webContents.debugger.sendCommand('Input.imeSetComposition', {
+          text: "b'g", selectionStart: 3, selectionEnd: 3,
+        });
+        await delay(200);
+        assert.equal(
+          await read('document.querySelector("#slash-menu").style.display'), 'block',
+          'apostrophe in preedit wrongly closed the menu'
+        );
+        assert.equal(
+          await read('document.querySelector("#slash-menu").textContent'), '表格3 列',
+          'preedit "b\'g" did not narrow to the table'
+        );
+        // 直接上屏（触发 compositionend），中间没有任何「回车」
+        await win.webContents.debugger.sendCommand('Input.insertText', { text: 'bg' });
+      } finally {
+        win.webContents.debugger.detach();
+      }
+      await until(
+        `JSON.parse(window.__noteSnapshot()).t.startsWith('| 列1')`,
+        'compositionend did not confirm /bg; snapshot=' + JSON.stringify(await snapshot())
+      );
+      await mouse('#new-btn');
+      await until('document.querySelectorAll(".cm-table-wrap").length === 0', 'new page after IME order case');
+    });
+    // 不完整的别名（/b）不得被误插
+    await check('incomplete alias survives IME commit without inserting', async () => {
+      await mouse('.cm-content');
+      await type('/');
+      win.webContents.debugger.attach('1.3');
+      try {
+        await win.webContents.debugger.sendCommand('Input.imeSetComposition', {
+          text: 'b', selectionStart: 1, selectionEnd: 1,
+        });
+        await delay(150);
+        await win.webContents.debugger.sendCommand('Input.insertText', { text: 'b' });
+      } finally {
+        win.webContents.debugger.detach();
+      }
+      await delay(500);
+      const text = (await snapshot()).t;
+      assert.equal(text, '/b', 'incomplete alias /b must not insert; got ' + JSON.stringify(text));
+      await mouse('#new-btn');
+      await until('document.querySelectorAll(".cm-table-wrap").length === 0', 'new page after incomplete alias case');
+    });
     await check('/bg Enter renders and focuses within one second', async () => {
       await mouse('.cm-content');
       await type('/bg');
