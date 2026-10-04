@@ -15,6 +15,7 @@ const fs = require('fs');
 
 const IS_SMOKE = process.argv.includes('--smoke');
 const IS_DIAG = process.argv.includes('--diag');
+const IS_MANUAL = process.argv.includes('--manual');
 const HOTKEY = 'Alt+Q';
 const DEFAULT_NOTES_DIR = 'D:\\desktop\\insights';
 
@@ -146,6 +147,7 @@ function writeCurrentPage(text, caret) {
     saveState({ ...st, file: null, caret: 0 });
     return;
   }
+  ensureNotesDir();
   const file = st.file || newFilePath();
   fs.writeFileSync(file, String(text), 'utf8');
   const carets = { ...(st.carets || {}), [file]: Math.max(0, caret | 0) };
@@ -188,14 +190,26 @@ function createWindow() {
       hideWindow();
     }
   });
+  // 窗口真实可见性推送给渲染端（表格卡片等测量敏感组件依赖它做渲染门控）
+  const sendVis = () => {
+    if (!win || win.isDestroyed()) return;
+    const visible = win.isVisible();
+    console.log('[win-visibility] send', visible);
+    win.webContents.send('win-visibility', visible);
+  };
+  win.on('show', sendVis);
+  win.on('hide', sendVis);
   win.webContents.on('did-finish-load', () => {
     pageReady = true;
     sendTheme();
+    sendVis();
     win.webContents.send('settings-changed', settings);
   });
   // 渲染层报错转发到主进程日志，便于排查
-  win.webContents.on('console-message', (_e, level, message, _line, sourceId) => {
-    if (level >= 2) console.log(`[renderer:${level}]`, message, sourceId);
+  win.webContents.on('console-message', (event) => {
+    if (event.level === 'warning' || event.level === 'error' || event.message.startsWith('[table-render]')) {
+      console.log(`[renderer:${event.level}]`, event.message, event.sourceId);
+    }
   });
 }
 
@@ -350,6 +364,13 @@ if (!app.requestSingleInstanceLock()) {
     createWindow();
     createTray();
 
+    if (IS_MANUAL) {
+      await new Promise((resolve) =>
+        pageReady ? resolve() : win.webContents.once('did-finish-load', resolve)
+      );
+      showWindow();
+    }
+
     if (app.isPackaged) {
       const st = loadState();
       if (!st.autostartInit) {
@@ -381,18 +402,29 @@ if (!app.requestSingleInstanceLock()) {
         process.exitCode = 1;
       }
       if (IS_DIAG) {
-        // 隐藏窗口的零视口会让 CodeMirror 不渲染行，诊断需可见：移到屏幕外显示
-        // 注意：必须在 new-page 检查之前跑，否则空文档恢复会清掉诊断样例
-        win.setBounds({ x: -3000, y: -3000, width: 900, height: 600 });
-        win.showInactive();
-        for (let i = 0; i < 14; i++) {
-          await new Promise((r) => setTimeout(r, 500));
-          const res = await win.webContents.executeJavaScript('window.__diagResult || null');
-          if (res) {
-            console.log('DIAG', res);
-            break;
-          }
+        // 诊断样例含组件（代码/表格卡片），必须等窗口真实可见后再由渲染端插入。
+        // 注意：本机远程桌面/部分 GPU 环境下，窗口显示初期不产出稳定布局，插入样例会
+        // 让组件测量自旋（v1.3.1 起即如此）；渲染端会等真实可见信号再插入，此处只负责
+        // 显示窗口与单次读取（不做高频轮询），超时优雅降级不影响冒烟结论
+        await new Promise((r) => setTimeout(r, 600));
+        win.setBounds({ width: 900, height: 600 });
+        win.center();
+        win.show();
+        win.focus();
+        await new Promise((r) => setTimeout(r, 3500));
+        const res = await Promise.race([
+          win.webContents.executeJavaScript('window.__diagResult || JSON.stringify({ pending: true, tableRender: window.__tableRenderState, visibility: document.visibilityState })'),
+          new Promise((r) => setTimeout(() => r(null), 2000)),
+        ]);
+        const diag = res && JSON.parse(res);
+        if (diag && !diag.pending) {
+          console.log('DIAG', res);
+          if (diag.buildErr || !Object.values(diag.tableCheck).every((value) => value === true)) process.exitCode = 1;
+        } else {
+          console.error('DIAG incomplete: renderer/compositor unavailable; this is not a rendering pass.', res || 'renderer did not respond');
+          process.exitCode = 1;
         }
+        win.hide();
       }
       try {
         await newPage();
@@ -414,7 +446,7 @@ if (!app.requestSingleInstanceLock()) {
         process.exitCode = 1;
       }
       console.log('SMOKE hotkey:', ok ? 'OK' : 'FAIL');
-      console.log('SMOKE-OK');
+      console.log(process.exitCode ? 'SMOKE-FAIL' : 'SMOKE-OK');
       app.exit(process.exitCode || 0);
     }
   });

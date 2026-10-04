@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('bridge', {
   onTheme: (cb) => ipcRenderer.on('theme', (_e, theme) => cb(theme)),
   onSettingsChanged: (cb) => ipcRenderer.on('settings-changed', (_e, s) => cb(s)),
   onOpenSettings: (cb) => ipcRenderer.on('open-settings', () => cb()),
+  // 窗口真实可见性（渲染端 document.hidden 在未显示窗口里不可靠，会误报“可见”）
+  onVisibility: (cb) => ipcRenderer.on('win-visibility', (_e, visible) => cb(visible)),
   listPages: () => ipcRenderer.invoke('list-pages'),
   openPage: (p) => ipcRenderer.send('open-page', p),
   deletePage: (p) => ipcRenderer.invoke('delete-page', p),

@@ -7,7 +7,7 @@ import {
   Decoration,
   WidgetType,
 } from '@codemirror/view';
-import { EditorState, Compartment } from '@codemirror/state';
+import { EditorState, Compartment, StateField, Prec } from '@codemirror/state';
 import {
   HighlightStyle,
   syntaxHighlighting,
@@ -17,7 +17,7 @@ import {
 import { tags as t } from '@lezer/highlight';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { languages } from '@codemirror/language-data';
-import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap, undo, redo, isolateHistory } from '@codemirror/commands';
 
 const bridge = window.bridge;
 
@@ -34,6 +34,7 @@ let listTimer = null;
 const uiSettings = { fontSize: 15, tabWidth: 2, lineNumbers: true, indentDots: true };
 const indentComp = new Compartment();
 const previewComp = new Compartment();
+const historyComp = new Compartment();
 
 // ---------- 语法高亮（VSCode Dark+/Light+ 调性，颜色取自 CSS 变量） ----------
 
@@ -136,6 +137,721 @@ class PlainWidget extends WidgetType {
   }
 }
 
+// ---------- 表格卡片（GFM 表格渲染 + 行列编辑） ----------
+
+// 按未转义的 | 切分一行表格文本；每格保留行内区间，用于点击跳回源码定位
+function splitRow(text) {
+  const bounds = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '|' && text[i - 1] !== '\\') bounds.push(i);
+  }
+  if (text[0] !== '|') bounds.unshift(-1);
+  if (bounds[bounds.length - 1] !== text.length - 1) bounds.push(text.length);
+  const cells = [];
+  for (let i = 0; i + 1 < bounds.length; i++) {
+    const from = bounds[i] + 1;
+    const to = bounds[i + 1];
+    const seg = text.slice(from, to);
+    cells.push({ text: seg, raw: seg.trim(), from, to });
+  }
+  return cells;
+}
+
+const isDelimCells = (cells) => cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c.raw));
+
+// 单元格以源码原文存储（含 \| 转义），结构改动时原样拼回，显示时再还原
+const serializeRow = (cells) => '| ' + cells.join(' | ') + ' |';
+
+// 序列化文本里第 col 格内光标应落的相对位置（空格落在两空格中间）
+function tableCellAnchor(text, col) {
+  const cells = splitRow(text);
+  if (col >= cells.length) return text.length;
+  const c = cells[col];
+  return c.from + (c.raw ? c.text.length - c.text.trimStart().length : 1);
+}
+
+function readTableLines(st, node) {
+  const lines = [];
+  for (let pos = node.from; pos <= node.to; ) {
+    const line = st.doc.lineAt(pos);
+    lines.push(line);
+    if (line.to >= node.to) break;
+    pos = line.to + 1;
+  }
+  return lines;
+}
+
+// 解析表格块：lines[0]=表头 lines[1]=分隔行 lines[2..]=数据行；数据行补齐到表头列数
+function readTableBlock(st, node) {
+  const lines = readTableLines(st, node);
+  if (lines.length < 2) return null;
+  const head = splitRow(lines[0].text);
+  const delim = splitRow(lines[1].text);
+  if (!head.length || !isDelimCells(delim)) return null;
+  const n = head.length;
+  const rows = lines.slice(2).map((l) => {
+    const cells = splitRow(l.text).map((c) => c.raw);
+    while (cells.length < n) cells.push('');
+    return cells;
+  });
+  return { lines, head: head.map((c) => c.raw), delim: delim.map((c) => c.raw), rows, n };
+}
+
+function climbTableAt(st, p) {
+  for (const side of [-1, 1]) {
+    let node = syntaxTree(st).resolveInner(p, side);
+    while (node) {
+      if (node.name === 'Table') return node;
+      node = node.parent;
+    }
+  }
+  return null;
+}
+
+// 点击发生在卡片 DOM 里，此刻按当前文档重新定位表格范围
+function findTableRangeAt(el) {
+  let pos;
+  try { pos = view.posAtDOM(el); } catch { return null; }
+  const st = view.state;
+  const node = climbTableAt(st, Math.max(0, Math.min(pos, st.doc.length)));
+  if (node) return { from: node.from, to: node.to };
+  return scanTableAround(st, pos);
+}
+
+// 兜底：语法树没命中时按「表头行 + 分隔行」的文本特征找表格
+function scanTableAround(st, pos) {
+  const start = st.doc.lineAt(Math.max(0, Math.min(pos, st.doc.length))).number;
+  for (let ln = start; ln >= Math.max(1, start - 1); ln--) {
+    const delim = st.doc.line(ln);
+    if (delim.text.indexOf('|') === -1 || !isDelimCells(splitRow(delim.text))) continue;
+    if (ln <= 1) continue;
+    const head = st.doc.line(ln - 1);
+    if (head.text.indexOf('|') === -1) continue;
+    let end = delim.to;
+    for (let l = ln + 1; l <= st.doc.lines; l++) {
+      const row = st.doc.line(l);
+      if (row.text.indexOf('|') === -1) break;
+      end = row.to;
+    }
+    return { from: head.from, to: end };
+  }
+  return null;
+}
+
+function tbBtn(op, arg, label, title) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'cm-tb-btn';
+  b.dataset.op = op;
+  if (arg != null) b.dataset.arg = String(arg);
+  b.textContent = label;
+  if (title) b.title = title;
+  return b;
+}
+
+// 单元格：可直接编辑的输入块（plaintext-only 拦截富文本粘贴），data-line/data-col 定位
+function tbCellEdit(raw, lineIdx, col, isHead) {
+  const td = document.createElement('td');
+  td.className = 'cm-tb-cell' + (isHead ? ' cm-tb-head' : '');
+  td.dataset.line = String(lineIdx);
+  td.dataset.col = String(col);
+  const d = document.createElement('div');
+  d.className = 'cm-tb-edit';
+  d.contentEditable = 'plaintext-only';
+  d.textContent = raw.replace(/\\\|/g, '|');
+  td.appendChild(d);
+  return td;
+}
+
+// 卡片内正在编辑时保持组件 DOM 不被重建（否则输入焦点丢失）；
+// 只在结构变化（行列增删）或编辑结束时重建
+let tableLiveEdit = null; // { from } 正在编辑的表格（表头行位置）
+let tableSyncTimer = null;
+let tableComposing = false;
+let tableColumnWidths = new Map(); // 当前页面中每张表的列宽（像素）；不改 Markdown 语法。
+const tableWidthSignature = (head, delim) => JSON.stringify([head, delim]);
+
+// 渲染态表格卡片：单元格可直接编辑，悬停表头/行首增删行列，底部整体追加
+class TableWidget extends WidgetType {
+  constructor(block) {
+    super();
+    this.from = block.lines[0].from;
+    this.head = block.head;
+    this.delim = block.delim;
+    this.rows = block.rows;
+    this.nCols = block.head.length;
+    this.rowCount = block.rows.length;
+    this.key = JSON.stringify([block.head, block.delim, block.rows]);
+  }
+  eq(other) {
+    if (
+      tableLiveEdit && tableLiveEdit.from === this.from &&
+      other instanceof TableWidget &&
+      other.from === this.from &&
+      other.nCols === this.nCols &&
+      other.rowCount === this.rowCount
+    ) {
+      return true; // 编辑期间：DOM 是最新内容的载体，不重建
+    }
+    return other.from === this.from && other.key === this.key;
+  }
+  ignoreEvent() { return true; } // 卡片内事件全部自行处理
+  toDOM() {
+    const wrap = document.createElement('div');
+    wrap.className = 'cm-table-wrap';
+    wrap.dataset.tableFrom = String(this.from);
+    const table = document.createElement('table');
+    table.className = 'cm-table';
+    const n = this.head.length;
+    const entry = tableColumnWidths.get(this.from);
+    const widths = entry && entry.signature === tableWidthSignature(this.head, this.delim)
+      ? entry.widths
+      : [];
+    const cols = document.createElement('colgroup');
+    cols.appendChild(document.createElement('col'));
+    this.head.forEach((_raw, c) => {
+      const col = document.createElement('col');
+      col.style.width = (widths[c] || 120) + 'px';
+      cols.appendChild(col);
+    });
+    table.appendChild(cols);
+    table.style.width = (20 + this.head.reduce((sum, _raw, c) => sum + (widths[c] || 120), 0)) + 'px';
+    const align = (c) => {
+      const marker = this.delim[c] || '';
+      return marker.endsWith(':') ? (marker.startsWith(':') ? 'center' : 'right') : 'left';
+    };
+
+    const thead = document.createElement('thead');
+    const hr = document.createElement('tr');
+    const hg = document.createElement('td');
+    hg.className = 'cm-tb-gutter cm-tb-gutter-head';
+    hr.appendChild(hg);
+    this.head.forEach((raw, c) => {
+      const th = tbCellEdit(raw, 0, c, true);
+      th.style.textAlign = align(c);
+      const ops = document.createElement('span');
+      ops.className = 'cm-tb-colops';
+      ops.appendChild(tbBtn('col-add', c, '+', '右侧插入列'));
+      ops.appendChild(tbBtn('col-del', c, '×', n > 1 ? '删除此列（Ctrl+Z 撤销）' : '删除整表（Ctrl+Z 撤销）'));
+      th.appendChild(ops);
+      const handle = document.createElement('span');
+      handle.className = 'cm-tb-resize';
+      handle.dataset.col = String(c);
+      handle.title = '拖动调整列宽';
+      handle.setAttribute('role', 'separator');
+      handle.setAttribute('aria-orientation', 'vertical');
+      handle.setAttribute('aria-label', '第 ' + (c + 1) + ' 列宽度');
+      handle.tabIndex = 0;
+      th.appendChild(handle);
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    this.rows.forEach((row, r) => {
+      const tr = document.createElement('tr');
+      const g = document.createElement('td');
+      g.className = 'cm-tb-gutter';
+      const ops = document.createElement('span');
+      ops.className = 'cm-tb-rowops';
+      ops.appendChild(tbBtn('row-add', r, '+', '下方插入行'));
+      ops.appendChild(tbBtn('row-del', r, '×', '删除此行（Ctrl+Z 撤销）'));
+      g.appendChild(ops);
+      tr.appendChild(g);
+      for (let c = 0; c < n; c++) {
+        const td = tbCellEdit(row[c] || '', 2 + r, c, false);
+        td.style.textAlign = align(c);
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+
+    const foot = document.createElement('div');
+    foot.className = 'cm-table-foot';
+    foot.appendChild(tbBtn('row-append', null, '＋ 行'));
+    foot.appendChild(tbBtn('col-append', null, '＋ 列'));
+    const tip = document.createElement('span');
+    tip.className = 'cm-table-tip';
+    tip.textContent = '删除可 Ctrl+Z 撤销';
+    foot.appendChild(tip);
+    wrap.appendChild(foot);
+    bindTableCardEvents(wrap);
+    bindTableResize(wrap, tableWidthSignature(this.head, this.delim));
+    return wrap;
+  }
+}
+
+function bindTableResize(wrap, signature) {
+  const table = wrap.querySelector('table');
+  const setWidth = (c, width) => {
+    const columns = Array.from(table.querySelectorAll('col')).slice(1);
+    const widths = columns.map((col) => parseFloat(col.style.width));
+    widths[c] = Math.max(64, Math.min(900, width));
+    columns[c].style.width = widths[c] + 'px';
+    table.style.width = (20 + widths.reduce((sum, value) => sum + value, 0)) + 'px';
+    const from = Number(wrap.dataset.tableFrom);
+    const entry = tableColumnWidths.get(from);
+    tableColumnWidths.set(from, { widths, signature: entry ? entry.signature : signature });
+  };
+  wrap.querySelectorAll('.cm-tb-resize').forEach((handle) => {
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      flushTableInput();
+      const c = Number(handle.dataset.col);
+      const startWidth = parseFloat(table.querySelectorAll('col')[c + 1].style.width);
+      const startX = e.clientX;
+      handle.setPointerCapture(e.pointerId);
+      handle.classList.add('dragging');
+      const move = (event) => setWidth(c, startWidth + event.clientX - startX);
+      const stop = () => {
+        handle.classList.remove('dragging');
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('lostpointercapture', stop);
+      };
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('lostpointercapture', stop);
+    });
+    handle.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      e.stopPropagation();
+      const c = Number(handle.dataset.col);
+      setWidth(c, parseFloat(table.querySelectorAll('col')[c + 1].style.width) + (e.key === 'ArrowRight' ? 16 : -16));
+    });
+  });
+}
+
+// 把卡片单元格的文本同步回 Markdown 源码（整行重写，一次撤销步骤）
+function syncTableCell(lineIdx, col, text) {
+  if (!tableLiveEdit) return;
+  const node = climbTableAt(view.state, Math.min(tableLiveEdit.from, view.state.doc.length - 1));
+  if (!node) return;
+  const block = readTableBlock(view.state, node);
+  if (!block) return;
+  const li = Math.min(Math.max(0, lineIdx), block.lines.length - 1);
+  const line = block.lines[li];
+  const raws = splitRow(line.text).map((c) => c.raw);
+  while (raws.length < block.n) raws.push('');
+  raws[Math.min(col, raws.length - 1)] = text.replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+  const insert = serializeRow(raws);
+  if (insert === line.text) return;
+  view.dispatch({
+    changes: { from: line.from, to: line.to, insert },
+    userEvent: 'input.table-cell',
+  });
+}
+
+// 结束卡片编辑：先落盘未同步的输入，再解除 DOM 保持并重建装饰采纳最新源码
+function flushTableInput(force = false) {
+  if (tableComposing && !force) return;
+  clearTimeout(tableSyncTimer);
+  tableSyncTimer = null;
+  const pending = tablePendingSync;
+  tablePendingSync = null;
+  if (pending && tableLiveEdit) syncTableCell(pending.lineIdx, pending.col, pending.text);
+}
+
+function endTableEdit() {
+  flushTableInput(true);
+  tableComposing = false;
+  if (!tableLiveEdit) return;
+  tableLiveEdit = null;
+  view.dispatch({ selection: view.state.selection });
+}
+
+let tablePendingSync = null; // { lineIdx, col, text } 待写回的单元格内容
+
+// 聚焦单元格并把光标放到文本末尾
+function focusTableCell(td) {
+  const edit = td.querySelector('.cm-tb-edit');
+  if (!edit) return;
+  edit.focus();
+  const rng = document.createRange();
+  rng.selectNodeContents(edit);
+  rng.collapse(false);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(rng);
+}
+
+let tableFocusTimer = null;
+function cancelTableFocus() {
+  clearTimeout(tableFocusTimer);
+  tableFocusTimer = null;
+}
+
+// 最近一次「希望聚焦某个表格单元格」的意图；被面板等打断后，关掉面板时可以续上
+let tableFocusIntent = null;
+
+// 只聚焦目标表格；定时重试不依赖 rAF，切页/用户移动光标后不抢回焦点。
+function requestTableCellFocus(from, line, col, delay = 0) {
+  cancelTableFocus();
+  const caret = view.state.selection.main.head;
+  tableFocusIntent = { from, line, col, caret };
+  let retries = 0;
+  const attempt = () => {
+    tableFocusTimer = null;
+    if (view.state.selection.main.head !== caret) return;
+    const active = document.activeElement;
+    if (active && !editorHost.contains(active) && active !== document.body) return;
+    if (active && active.closest && active.closest('.cm-tb-edit')) return;
+    if (tableRenderOk && tableWindowVisible) {
+      const td = document.querySelector(
+        '.cm-table-wrap[data-table-from="' + from + '"] td[data-line="' + line + '"][data-col="' + col + '"]'
+      );
+      if (td) { focusTableCell(td); return; }
+    }
+    if (retries++ < 5) tableFocusTimer = setTimeout(attempt, 200);
+  };
+  tableFocusTimer = setTimeout(attempt, delay);
+}
+
+window.addEventListener('mousedown', (event) => {
+  if (tableFocusTimer && !event.target.closest('.cm-table-wrap')) cancelTableFocus();
+}, true);
+window.addEventListener('blur', cancelTableFocus);
+
+// 卡片内全部可聚焦单元格序列：表头 → 数据行逐行（跳过分隔行）
+function tableCellSeq(wrap) {
+  const seq = [];
+  wrap.querySelectorAll('td[data-line]').forEach((td) => {
+    if (Number(td.dataset.line) !== 1) seq.push(td);
+  });
+  return seq;
+}
+
+// 卡片内交互（组件 ignoreEvent，事件全在这里接）
+function bindTableCardEvents(el) {
+  const wrap = el; // .cm-table-wrap
+  wrap.addEventListener('focusin', (e) => {
+    const td = e.target.closest && e.target.closest('td[data-line]');
+    if (td) {
+      const w = wrap.dataset.tableFrom;
+      tableLiveEdit = { from: Number(w) };
+    }
+  });
+  wrap.addEventListener('focusout', (e) => {
+    if (wrap.contains(e.relatedTarget)) flushTableInput();
+    else endTableEdit();
+  });
+  // 输入防抖同步：打字期间不重建 DOM，350ms 静默后写回源码
+  wrap.addEventListener('input', (e) => {
+    const td = e.target.closest && e.target.closest('td[data-line]');
+    if (!td) return;
+    tablePendingSync = {
+      lineIdx: Number(td.dataset.line),
+      col: Number(td.dataset.col),
+      text: e.target.textContent,
+    };
+    clearTimeout(tableSyncTimer);
+    if (tableComposing || e.isComposing) return;
+    tableSyncTimer = setTimeout(() => {
+      flushTableInput();
+    }, 350);
+  });
+  wrap.addEventListener('compositionstart', () => {
+    tableComposing = true;
+    clearTimeout(tableSyncTimer);
+  });
+  wrap.addEventListener('compositionend', (e) => {
+    tableComposing = false;
+    const td = e.target.closest('td[data-line]');
+    if (!td) return;
+    tablePendingSync = { lineIdx: Number(td.dataset.line), col: Number(td.dataset.col), text: e.target.textContent };
+    clearTimeout(tableSyncTimer);
+    tableSyncTimer = setTimeout(flushTableInput, 350);
+  });
+  wrap.addEventListener('keydown', (e) => {
+    const td = e.target.closest && e.target.closest('td[data-line]');
+    if (!td) return;
+    const li = Number(td.dataset.line);
+    const col = Number(td.dataset.col);
+    if (tableComposing || e.isComposing || e.keyCode === 229) return;
+    const tableFrom = Number(wrap.dataset.tableFrom);
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      // 表头/分隔行回车 → 首个数据行；数据行回车 → 该行下方插行
+      const insertAfterLine = li <= 1 ? 1 : li;
+      endTableEdit();
+      tableStructOp('row-insert-at', insertAfterLine, { focus: [insertAfterLine + 1, col], tableFrom });
+      return;
+    }
+    if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      const seq = tableCellSeq(wrap);
+      const idx = seq.indexOf(td);
+      const target = e.shiftKey ? seq[idx - 1] : seq[idx + 1];
+      if (target) {
+        focusTableCell(target);
+      } else if (!e.shiftKey) {
+        // 末格 Tab：追加一行并聚焦新行首格
+        endTableEdit();
+        tableStructOp('row-append', null, { tableFrom });
+      }
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      endTableEdit();
+      cancelTableFocus();
+      view.focus();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      endTableEdit();
+      (e.shiftKey ? redo : undo)(view);
+      restoreTableFocus(tableFrom, li, col);
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      endTableEdit();
+      redo(view);
+      restoreTableFocus(tableFrom, li, col);
+      return;
+    }
+    if (e.ctrlKey && !e.altKey && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      flushAndSend();
+      return;
+    }
+  });
+  // 粘贴纯文本（plaintext-only 不生效时的兜底）
+  wrap.addEventListener('paste', (e) => {
+    const td = e.target.closest && e.target.closest('td[data-line]');
+    if (!td) return;
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    document.execCommand('insertText', false, text.replace(/\s+/g, ' '));
+  });
+}
+
+function restoreTableFocus(from, line, col) {
+  const node = climbTableAt(view.state, Math.min(from, view.state.doc.length));
+  const block = node && readTableBlock(view.state, node);
+  if (!block) { view.focus(); return; }
+  // 撤销的历史选择可能落在表内，把它移到表外再恢复同坐标单元格。
+  if (view.state.selection.main.head >= node.from && view.state.selection.main.head <= node.to) {
+    view.dispatch({ selection: { anchor: Math.min(node.to + 1, view.state.doc.length) } });
+  }
+  const targetLine = line === 0 || block.lines.length === 2 ? 0 : Math.min(Math.max(2, line), block.lines.length - 1);
+  const td = document.querySelector('.cm-table-wrap[data-table-from="' + node.from + '"] td[data-line="' + targetLine + '"][data-col="' + Math.min(col, block.n - 1) + '"]');
+  if (td) focusTableCell(td);
+  else requestTableCellFocus(node.from, targetLine, Math.min(col, block.n - 1));
+}
+
+// 结构操作：按当前文档重解析表格 → 修改行列 → 整表重写；focus=[li,col] 指定重建后聚焦的单元格
+function tableStructOp(op, arg, opts) {
+  const focus = opts && opts.focus ? opts.focus : null;
+  const rangeEl = opts && opts.tableFrom != null
+    ? document.querySelector('.cm-table-wrap[data-table-from="' + opts.tableFrom + '"]')
+    : document.querySelector('.cm-table-wrap');
+  const range = rangeEl ? findTableRangeAt(rangeEl) : null;
+  if (!range) return;
+  const block = readTableBlock(view.state, range);
+  if (!block) return;
+  const head = block.head.slice();
+  const delim = block.delim.slice();
+  const rows = block.rows.map((r) => r.slice());
+  const n = block.n;
+  const addCol = (at) => {
+    head.splice(at, 0, '');
+    delim.splice(at, 0, '---');
+    rows.forEach((r) => r.splice(at, 0, ''));
+    const entry = tableColumnWidths.get(range.from);
+    if (entry) entry.widths.splice(at, 0, 120);
+  };
+  let insert = null;
+  let focusCell = focus;
+  if (op === 'row-append') {
+    rows.push(Array(n).fill(''));
+    focusCell = focus || [2 + rows.length - 1, 0];
+  } else if (op === 'row-insert-at') {
+    const afterLineIdx = arg; // 0=表头行 1=分隔行 li=数据行所在行
+    const atRow = afterLineIdx <= 1 ? 0 : afterLineIdx - 1; // 数据行索引
+    rows.splice(atRow, 0, Array(n).fill(''));
+    focusCell = focus || [2 + atRow, 0];
+  } else if (op === 'row-add') {
+    rows.splice(arg + 1, 0, Array(n).fill(''));
+    focusCell = focus || [3 + arg, 0];
+  } else if (op === 'row-del') {
+    rows.splice(arg, 1);
+    focusCell = rows.length ? [2 + Math.min(arg, rows.length - 1), 0] : [0, 0];
+  } else if (op === 'col-append') {
+    addCol(n);
+    focusCell = focus || [0, n];
+  } else if (op === 'col-add') {
+    addCol(arg + 1);
+    focusCell = focus || [0, arg + 1];
+  } else if (op === 'col-del') {
+    if (n <= 1) insert = ''; // 最后一列也删 → 删除整个表格
+    else {
+      head.splice(arg, 1);
+      delim.splice(arg, 1);
+      rows.forEach((r) => r.splice(arg, 1));
+      const entry = tableColumnWidths.get(range.from);
+      if (entry) entry.widths.splice(arg, 1);
+      focusCell = [0, Math.min(arg, n - 2)];
+    }
+  } else return;
+  if (insert === null) {
+    insert = [serializeRow(head), serializeRow(delim), ...rows.map(serializeRow)].join('\n');
+  }
+  const widthEntry = tableColumnWidths.get(range.from);
+  if (insert === '') tableColumnWidths.delete(range.from);
+  else if (widthEntry) widthEntry.signature = tableWidthSignature(head, delim);
+  view.dispatch({ changes: { from: range.from, to: range.to, insert }, userEvent: 'input.table', annotations: isolateHistory.of('full') });
+  if (focusCell) {
+    const [fl, fc] = focusCell;
+    requestTableCellFocus(range.from, fl, fc);
+  } else {
+    view.focus();
+  }
+}
+
+// 在 line 之后插入空行并把光标放进第一格
+function insertRowAfter(view, line, n) {
+  view.dispatch({
+    changes: { from: line.to, insert: '\n' + serializeRow(Array(n).fill('')) },
+    selection: { anchor: line.to + 3 },
+    userEvent: 'input.table-row',
+  });
+}
+
+// 跳到 lines[li] 的第 col 格（格子不足时补齐）
+function gotoCell(view, block, li, col) {
+  const tLine = block.lines[li];
+  if (splitRow(tLine.text).length < block.n) {
+    const raws = splitRow(tLine.text).map((c) => c.raw);
+    while (raws.length < block.n) raws.push('');
+    const padded = serializeRow(raws);
+    view.dispatch({
+      changes: { from: tLine.from, to: tLine.to, insert: padded },
+      selection: { anchor: tLine.from + tableCellAnchor(padded, col) },
+      userEvent: 'select.table-cell',
+    });
+    return;
+  }
+  view.dispatch({
+    selection: { anchor: tLine.from + tableCellAnchor(tLine.text, col) },
+    userEvent: 'select.table-cell',
+  });
+}
+
+// 表格内回车：追加一行；空行上回车 = 清空该行退出表格
+function tableEnter(view) {
+  if (view.composing) return false;
+  const st = view.state;
+  const sel = st.selection.main;
+  if (!sel.empty) return false;
+  const table = climbTableAt(st, sel.head);
+  if (!table) return false;
+  const block = readTableBlock(st, table);
+  if (!block) return false;
+  const line = st.doc.lineAt(sel.head);
+  const li = line.number - block.lines[0].number;
+  if (li === 0) {
+    // 表头回车：跳到第一个数据行（没有就建一行）
+    if (block.lines.length > 2) gotoCell(view, block, 2, 0);
+    else insertRowAfter(view, block.lines[1], block.n);
+    return true;
+  }
+  if (li === 1) {
+    // 分隔行回车：跳到第一个数据行（没有就建一行）
+    if (block.lines.length > 2) gotoCell(view, block, 2, 0);
+    else insertRowAfter(view, block.lines[1], block.n);
+    return true;
+  }
+  if (li < 0 || li >= block.lines.length) return false;
+  const cells = splitRow(line.text);
+  if (cells.length && cells.every((c) => c.raw === '')) {
+    view.dispatch({
+      changes: { from: line.from, to: line.to },
+      selection: { anchor: line.from },
+      userEvent: 'delete.table-exit',
+    });
+    return true;
+  }
+  insertRowAfter(view, line, block.n);
+  return true;
+}
+
+// 表格内 Tab / Shift+Tab：在单元格间跳转；末格 Tab 追加一行
+function tableTab(view, shift) {
+  if (view.composing) return false;
+  const st = view.state;
+  const sel = st.selection.main;
+  if (!sel.empty) return false;
+  const table = climbTableAt(st, sel.head);
+  if (!table) return false;
+  const block = readTableBlock(st, table);
+  if (!block) return false;
+  const line = st.doc.lineAt(sel.head);
+  const li = line.number - block.lines[0].number;
+  if (li < 0 || li >= block.lines.length) return false;
+  if (li === 1) return true; // 分隔行吞掉 Tab，避免插入缩进
+  const n = block.n;
+  const rel = sel.head - line.from;
+  const cells = splitRow(line.text);
+  let col = cells.findIndex((c) => rel < c.to);
+  if (col === -1) col = Math.max(0, cells.length - 1);
+
+  let targetLine = li;
+  let targetCol = shift ? col - 1 : col + 1;
+  if (targetCol < 0) {
+    if (targetLine <= 0) return true; // 表头第一格再往前：原地不动
+    targetLine -= 1;
+    if (targetLine === 1) targetLine = 0; // 跳过分隔行
+    targetCol = n - 1;
+  } else if (targetCol >= n) {
+    targetLine += 1;
+    targetCol = 0;
+    if (targetLine === 1) targetLine = 2; // 表头往后跳过分隔行
+    if (targetLine >= block.lines.length) {
+      insertRowAfter(view, block.lines[block.lines.length - 1], n);
+      return true;
+    }
+  }
+  gotoCell(view, block, targetLine, targetCol);
+  return true;
+}
+
+// 渲染态表格的删除保护：退格/删除会把行外文本拼进表格时，先转进源码而不是破坏表格
+function tableDeleteGuard(view, forward) {
+  if (view.composing) return false;
+  const st = view.state;
+  const sel = st.selection.main;
+  if (!sel.empty) return false;
+  const head = sel.head;
+  const line = st.doc.lineAt(head);
+  const table = forward
+    ? (head === line.to && line.number < st.doc.lines ? climbTableAt(st, head + 1) : null)
+    : (head === line.from && line.number > 1 ? climbTableAt(st, head - 1) : null);
+  if (!table) return false;
+  if (head >= table.from && head <= table.to) return false; // 已在源码态，不劫持
+  if (line.text === '') return false; // 空行上的删除维持默认（正常吸收空行）
+  const block = readTableBlock(st, table);
+  if (!block) return false;
+  if (forward) {
+    gotoCell(view, block, 0, 0);
+  } else {
+    const lastLine = block.lines[block.lines.length - 1];
+    const cells = splitRow(lastLine.text);
+    const anchor = cells.length
+      ? lastLine.from + cells[cells.length - 1].to -
+        (cells[cells.length - 1].text.length - cells[cells.length - 1].text.trimEnd().length)
+      : lastLine.to;
+    view.dispatch({ selection: { anchor }, userEvent: 'select.table' });
+  }
+  return true;
+}
+
 // ---------- 粘贴代码自动识别语言 ----------
 
 function guessLanguage(code) {
@@ -177,6 +893,7 @@ function buildMdDecos(view) {
   const head = st.selection.main.head;
   const inline = [];
   const lineDecos = [];
+  const hiddenLines = new Set(); // 被表格卡片整块替换的行，行内 HTML 扫描跳过
   if (st.doc.length > 300000) return Decoration.none;
 
   syntaxTree(st).iterate({
@@ -185,6 +902,18 @@ function buildMdDecos(view) {
       const from = ref.from;
       const to = ref.to;
 
+      if (name === 'Table') {
+        // 表格整体交给表格卡片插件；渲染态的行不再做行内处理
+        if (head < from || head > to) {
+          for (let pos = from; pos <= to; ) {
+            const line = st.doc.lineAt(pos);
+            hiddenLines.add(line.number);
+            if (line.to >= to) break;
+            pos = line.to + 1;
+          }
+        }
+        return false;
+      }
       if (name === 'CodeBlock') {
         // 缩进式代码块（4 空格起头）：按普通正文呈现，避免中文缩进触发“怪格式”
         for (let pos = from; pos <= to; ) {
@@ -252,6 +981,7 @@ function buildMdDecos(view) {
   // 行内 HTML（下划线/荧光笔/字号）：标签按节点级隐藏，效果常显（单行内有效）
   try {
     for (let i = 1; i <= st.doc.lines; i++) {
+      if (hiddenLines.has(i)) continue;
       const line = st.doc.line(i);
       if (!line.length) continue;
       scanInlineHtml(line, head, inline);
@@ -394,6 +1124,11 @@ const mdPreview = ViewPlugin.fromClass(
       this.decorations = buildMdDecos(view);
     }
     update(u) {
+      if (u.docChanged && tableColumnWidths.size) {
+        const shifted = new Map();
+        for (const [from, entry] of tableColumnWidths) shifted.set(u.changes.mapPos(from, 1), entry);
+        tableColumnWidths = shifted;
+      }
       if (u.docChanged || u.selectionSet || u.viewportChanged) {
         this.decorations = buildMdDecos(u.view);
       }
@@ -410,6 +1145,111 @@ const codeCard = ViewPlugin.fromClass(
     update(u) {
       if (u.docChanged || u.selectionSet || u.viewportChanged) {
         this.decorations = buildCardDecos(u.view);
+      }
+    }
+  },
+  { decorations: (v) => v.decorations }
+);
+
+// 表格卡片：光标在表外 → 表头行渲染整卡、其余行隐藏（行内逐行替换，不用块级装饰——
+// 块级组件在隐藏窗口与快速连续事务下存在测量竞态，会死循环）；光标进表 → 源码编辑
+// 渲染门控：主进程的窗口真实可见性驱动（document.hidden 在未显示窗口里会误报可见，
+// 且隐藏窗口里 rAF 照跑、布局为零——表格组件此时测量会让渲染进程自旋卡死）。
+// 2 帧 + 200ms 与 600ms 定时器竞速；隐藏/再次呼出使上次等待失效。
+let tableRenderOk = false;
+let tableWindowVisible = false;
+let tableRenderEpoch = 0;
+let tableRenderFrame = null;
+let tableRenderSettle = null;
+let tableRenderFallback = null;
+window.__tableRenderOk = false;
+window.__tableRenderState = { visible: false, ready: false, reason: 'hidden' };
+
+function cancelTableRenderWait() {
+  if (tableRenderFrame !== null) cancelAnimationFrame(tableRenderFrame);
+  clearTimeout(tableRenderSettle);
+  clearTimeout(tableRenderFallback);
+  tableRenderFrame = tableRenderSettle = tableRenderFallback = null;
+}
+
+function armTableRender() {
+  if (!tableWindowVisible || tableRenderOk || tableRenderFallback !== null) return;
+  const epoch = ++tableRenderEpoch;
+  const open = (reason) => {
+    if (!tableWindowVisible || epoch !== tableRenderEpoch || tableRenderOk) return;
+    cancelTableRenderWait();
+    tableRenderOk = window.__tableRenderOk = true;
+    window.__tableRenderState = { visible: true, ready: true, reason };
+    console.debug('[table-render] ready', reason, epoch);
+    view.dispatch({ selection: view.state.selection });
+  };
+  tableRenderFallback = setTimeout(() => open('timeout'), 600);
+  tableRenderFrame = requestAnimationFrame(() => {
+    tableRenderFrame = requestAnimationFrame(() => {
+      tableRenderFrame = null;
+      if (!tableWindowVisible || epoch !== tableRenderEpoch) return;
+      tableRenderSettle = setTimeout(() => open('frames'), 200);
+    });
+  });
+}
+if (bridge.onVisibility) {
+  bridge.onVisibility((visible) => {
+    tableWindowVisible = !!visible;
+    console.debug('[table-render] visibility', tableWindowVisible);
+    if (visible) armTableRender();
+    else {
+      ++tableRenderEpoch;
+      cancelTableRenderWait();
+      tableRenderOk = window.__tableRenderOk = false;
+      window.__tableRenderState = { visible: false, ready: false, reason: 'hidden' };
+      // 隐藏时不触发测量；装饰在下一次可见时重建。
+    }
+  });
+}
+
+function buildTableDecos(view) {
+  const st = view.state;
+  const decos = [];
+  if (st.doc.length > 300000) return Decoration.none;
+  const head = st.selection.main.head;
+  syntaxTree(st).iterate({
+    enter: (ref) => {
+      if (ref.name !== 'Table') return; // 非表格节点继续下降，勿在祖先节点剪枝
+      const node = ref.node;
+      const block = readTableBlock(st, node);
+      if (!block) return false;
+      if (head >= node.from && head <= node.to) {
+        for (const line of block.lines) {
+          decos.push(Decoration.line({ class: 'cm-table-line' }).range(line.from));
+        }
+        return false;
+      }
+      if (tableRenderOk) {
+        block.lines.forEach((line, i) => {
+          if (i === 0) {
+            decos.push(
+              Decoration.replace({ widget: new TableWidget(block) }).range(line.from, line.to)
+            );
+          } else {
+            decos.push(Decoration.replace({}).range(line.from, line.to));
+            decos.push(Decoration.line({ class: 'cm-table-hidden' }).range(line.from));
+          }
+        });
+      }
+      return false; // 表格是叶子块，无需再进子节点
+    },
+  });
+  return Decoration.set(decos, true);
+}
+
+const tableCard = ViewPlugin.fromClass(
+  class {
+    constructor(view) {
+      this.decorations = buildTableDecos(view);
+    }
+    update(u) {
+      if (u.docChanged || u.selectionSet || u.viewportChanged) {
+        this.decorations = buildTableDecos(u.view);
       }
     }
   },
@@ -459,10 +1299,11 @@ slashMenu.id = 'slash-menu';
 slashMenu.style.display = 'none';
 editorHost.appendChild(slashMenu);
 
-const slash = { open: false, anchor: -1, query: '', items: [], selected: 0 };
+const slash = { open: false, anchor: -1, query: '', items: [], selected: 0, pendingConfirm: 0 };
 
 function closeSlash() {
   slash.open = false;
+  slash.pendingConfirm = 0;
   slashMenu.style.display = 'none';
   slashMenu.textContent = '';
 }
@@ -491,6 +1332,13 @@ function renderSlash() {
     hint.className = 'slash-hint';
     hint.textContent = it.hint;
     row.appendChild(label);
+    if (it.label === '表格') {
+      const preview = document.createElement('span');
+      preview.className = 'slash-table-preview';
+      preview.setAttribute('aria-hidden', 'true');
+      for (let cell = 0; cell < 6; cell++) preview.appendChild(document.createElement('i'));
+      row.appendChild(preview);
+    }
     row.appendChild(hint);
     row.addEventListener('mousedown', (e) => {
       e.preventDefault();
@@ -523,23 +1371,38 @@ function applySnippet(item) {
   if (!slash.open) return;
   const from = slash.anchor;
   const to = view.state.selection.main.head;
-  const insert = item.snip.text;
+  const isTable = item.label === '表格';
+  const prefix = isTable && from > view.state.doc.lineAt(from).from ? '\n\n' : '';
+  // 表尾加空行：node.to 本身仍属于表内，必须让光标真正离开整表。
+  const insert = prefix + item.snip.text + (isTable ? '\n\n' : '');
   const selEnd = insert.length;
   const sel = item.snip.sel || { anchor: selEnd, head: selEnd };
+  closeSlash();
   view.dispatch({
     changes: { from, to, insert },
-    selection: { anchor: from + sel.anchor, head: from + sel.head },
+    // 表格：光标放到表外（末尾），让卡片立即渲染并聚焦第一个表头格
+    selection: isTable
+      ? { anchor: from + selEnd }
+      : { anchor: from + sel.anchor, head: from + sel.head },
     userEvent: 'input.complete',
   });
-  closeSlash();
   view.focus();
+  if (isTable) {
+    requestTableCellFocus(from + prefix.length, 0, 0, 260);
+  }
 }
 
 function handleSlashKey(event) {
+  if (event.isComposing || event.keyCode === 229 || view.composing) return false;
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     const dir = event.key === 'ArrowDown' ? 1 : -1;
     slash.selected = (slash.selected + dir + slash.items.length) % slash.items.length;
     renderSlash();
+    return true;
+  }
+  // 空格确认（输入法场景下空格常被占用，回车/Tab 始终可用）
+  if (event.key === ' ' && !event.isComposing) {
+    applySnippet(slash.items[slash.selected]);
     return true;
   }
   if (event.key === 'Enter' || event.key === 'Tab') {
@@ -552,6 +1415,45 @@ function handleSlashKey(event) {
   }
   return false;
 }
+
+// 输入法组合态下，回车 / 空格 / Tab 都是给输入法上屏用的，而 CodeMirror 会直接丢弃
+// 组合期间的全部键盘事件（@codemirror/view 的 DOMObserver.ignoreDuringComposition），
+// 所以 CM 的 keydown 处理器与 keymap 都收不到这次「确认」，文档会停在孤零零的 /bg。
+// 解决：在 DOM 捕获阶段旁听（早于 CM 的观察器），只记下确认意图（时间戳），
+// 等组合结束、上屏文本真正并入文档后再补一次确认。
+// 空格中文输入法下是选择/上屏候选键：若上屏的是中文，查询词会变且菜单关闭，
+// confirmSlashAfterComposition 重新核对后不会误插。
+const SLASH_IME_CONFIRM_MS = 1200;
+
+editorHost.addEventListener('keydown', (event) => {
+  if (!slash.open) return;
+  if (event.key !== 'Enter' && event.key !== 'Tab' && event.key !== ' ') return;
+  if (!(event.isComposing || event.keyCode === 229 || view.composing)) return;
+  slash.pendingConfirm = Date.now();
+}, true);
+
+// 组合结束后按当前文档重新核对查询词，仍匹配才确认，避免误插
+function confirmSlashAfterComposition() {
+  if (!slash.open || !slash.items.length) return;
+  const head = view.state.selection.main.head;
+  if (head <= slash.anchor) { closeSlash(); return; }
+  const q = view.state.doc.sliceString(slash.anchor + 1, head);
+  if (/[\s/]/.test(q) || q.length > 20) { closeSlash(); return; }
+  if (q !== slash.query) {
+    slash.query = q;
+    filterSlash();
+    if (!slash.open || !slash.items.length) return;
+  }
+  applySnippet(slash.items[slash.selected]);
+}
+
+document.addEventListener('compositionend', () => {
+  const at = slash.pendingConfirm;
+  slash.pendingConfirm = 0;
+  if (!at || Date.now() - at > SLASH_IME_CONFIRM_MS) return;
+  // 让 CodeMirror 先把上屏文本并入文档，再按最新文档确认
+  setTimeout(confirmSlashAfterComposition, 0);
+});
 
 function handleSlashUpdate(u) {
   if (!u.docChanged && !u.selectionSet) return;
@@ -705,15 +1607,19 @@ const view = new EditorView({
   state: EditorState.create({
     doc: '',
     extensions: [
-      history(),
+      historyComp.of(history()),
       EditorView.lineWrapping,
       indentComp.of(indentUnit.of('  ')), // Tab/自动缩进宽度（设置可改为 4）
       placeholder('记下此刻的灵感…'),
       markdown({ base: markdownLanguage, codeLanguages: languages }),
       syntaxHighlighting(highlight),
-      previewComp.of(mdPreview),
+      previewComp.of([mdPreview, tableCard]),
       codeCard,
       keymap.of([
+        { key: 'Enter', run: tableEnter },
+        { key: 'Tab', run: (v) => tableTab(v, false), shift: (v) => tableTab(v, true) },
+        { key: 'Backspace', run: (v) => tableDeleteGuard(v, false) },
+        { key: 'Delete', run: (v) => tableDeleteGuard(v, true) },
         { key: 'Enter', run: listContinuation },
         { key: 'Mod-b', run: wrapMark('**') },
         { key: 'Mod-i', run: wrapMark('*') },
@@ -721,7 +1627,7 @@ const view = new EditorView({
         ...defaultKeymap,
         ...historyKeymap,
       ]),
-      EditorView.domEventHandlers({
+      Prec.high(EditorView.domEventHandlers({
         // 粘贴代码：无围栏的裸代码自动包上带语言的围栏；带围栏但无语言的自动补标签
         paste(event) {
           const text = event.clipboardData && event.clipboardData.getData('text/plain');
@@ -797,7 +1703,7 @@ const view = new EditorView({
           }
           return false;
         },
-      }),
+      })),
       EditorView.updateListener.of((u) => {
         if (u.docChanged) {
           renderTitle();
@@ -813,8 +1719,21 @@ const view = new EditorView({
 });
 
 // 主进程收起/退出时从这里拉取内容与光标
-window.__noteSnapshot = () =>
-  JSON.stringify({ t: view.state.doc.toString(), c: view.state.selection.main.head });
+window.__noteSnapshot = () => {
+  flushTableInput(true);
+  return JSON.stringify({ t: view.state.doc.toString(), c: view.state.selection.main.head });
+};
+
+// 表格卡片交互（卡片 ignoreEvent）：按钮改结构；单元格是 contenteditable，原生聚焦编辑
+editorHost.addEventListener('mousedown', (e) => {
+  const btn = e.target.closest('.cm-table-wrap button');
+  if (!btn) return;
+  e.preventDefault();
+  const tableFrom = Number(btn.closest('.cm-table-wrap').dataset.tableFrom);
+  endTableEdit(); // 结构变化前先落盘未同步的输入
+  const arg = btn.dataset.arg != null ? Number(btn.dataset.arg) : null;
+  tableStructOp(btn.dataset.op, arg, { tableFrom });
+});
 
 // 滚动 / 窗口失焦时收起斜杠菜单
 view.scrollDOM.addEventListener('scroll', closeSlash, true);
@@ -929,7 +1848,12 @@ function fillSettings(s) {
   document.getElementById('set-version').textContent = 'NoteAnywhere v' + s.version;
 }
 
+// 打开设置时焦点会离开编辑区；记住它，关闭面板后归还，
+// 否则用户关掉设置后焦点停在头部按钮上，得重新点回表格单元格。
+let settingsReturnFocus = null;
+
 async function openSettings() {
+  if (!settingsOpen && !settingsReturnFocus) settingsReturnFocus = document.activeElement;
   try {
     fillSettings(await bridge.getSettings());
   } catch {}
@@ -942,6 +1866,20 @@ function closeSettings() {
   settingsOpen = false;
   hotkeyListening = false;
   settingsMask.hidden = true;
+  const back = settingsReturnFocus;
+  settingsReturnFocus = null;
+  const td = back && back.isConnected && back.closest ? back.closest('td[data-line]') : null;
+  if (td) { focusTableCell(td); return; }
+  if (back && back.isConnected && back.focus) back.focus();
+  resumeTableFocusIntent();
+}
+
+// 面板打断过一次表格聚焦（例如 /bg 插入后的自动聚焦）时，关掉面板后续上；
+// 期间用户若移动过光标则视为意图失效，不抢焦点。
+function resumeTableFocusIntent() {
+  if (!tableFocusIntent || tableFocusIntent.caret !== view.state.selection.main.head) return;
+  const { from, line, col } = tableFocusIntent;
+  requestTableCellFocus(from, line, col);
 }
 
 function updateHintKeys(hotkey) {
@@ -959,7 +1897,7 @@ bridge.onSettingsChanged((s) => {
   view.dispatch({
     effects: [
       indentComp.reconfigure(indentUnit.of(' '.repeat(uiSettings.tabWidth))),
-      previewComp.reconfigure(s.livePreview === false ? [] : mdPreview),
+      previewComp.reconfigure(s.livePreview === false ? [] : [mdPreview, tableCard]),
     ],
   });
   if (s.hotkey) {
@@ -973,10 +1911,24 @@ bridge.onSettingsChanged((s) => {
 
 bridge.onOpenSettings(() => openSettings());
 
+// mousedown 早于按钮自身获得焦点，此刻记下的才是用户原本的焦点位置；
+// 再次点按钮是「关闭」，别用按钮自己的焦点覆盖掉打开前记录的位置。
+document.getElementById('settings-btn').addEventListener('mousedown', () => {
+  if (!settingsOpen) settingsReturnFocus = document.activeElement;
+}, true);
 document.getElementById('settings-btn').addEventListener('click', () => {
   settingsOpen ? closeSettings() : openSettings();
 });
 document.getElementById('settings-close').addEventListener('click', closeSettings);
+
+// Esc 关闭设置面板：面板打开时焦点在面板控件上，编辑器的 keydown 收不到按键，
+// 必须在 DOM 层兜住（正在录制热键时让给热键录制逻辑自己处理）。
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229) return;
+  if (!settingsOpen || hotkeyListening) return;
+  event.preventDefault();
+  closeSettings();
+}, true);
 settingsMask.addEventListener('mousedown', (e) => {
   if (e.target === settingsMask) closeSettings();
 });
@@ -1414,6 +2366,7 @@ function flashSaved() {
 }
 
 function saveNow() {
+  flushTableInput();
   const text = view.state.doc.toString();
   bridge.save(text, view.state.selection.main.head);
   if (text.trim()) flashSaved();
@@ -1429,13 +2382,22 @@ function flushAndSend() {
 // ---------- 恢复页面（呼出/切换/新建） ----------
 
 bridge.onRestore(({ text, caret, file }) => {
+  cancelTableFocus();
+  endTableEdit();
+  clearTimeout(saveTimer);
   closeModal();
   closeSettings();
+  const changedPage = currentFile !== (file || null);
+  if (changedPage) {
+    tableColumnWidths = new Map();
+    view.dispatch({ effects: historyComp.reconfigure([]) });
+  }
   if (view.state.doc.toString() !== text) {
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
   }
   const pos = Math.min(Math.max(0, caret | 0), text.length);
   view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+  if (changedPage) view.dispatch({ effects: historyComp.reconfigure(history()) });
   view.focus();
   currentFile = file || null;
   renderTitle();
@@ -1449,21 +2411,26 @@ bridge.onRestore(({ text, caret, file }) => {
 });
 
 // ---------- 渲染诊断（--diag 启动时运行，验证着色链路） ----------
+// 样例须等窗口真实可见后再插入：真隐藏窗口里 DOM 仍会报 visible、rAF 照跑，
+// 但布局为零——含组件（代码卡片/表格卡片）的测量会自旋卡死渲染进程
 if (location.search.indexOf('diag') !== -1) {
+  const startDiag = () => {
+  setTimeout(() => {
   (async () => {
     const sample =
-      '# 标题\n\n正文 <span style="font-size:24px">外层大字<u>嵌套下划线</u>尾部</span> 结束\n<u>纯下划线</u> <mark>纯荧光</mark> **加粗叠加<mark>荧光</mark>**\n\n```cpp\n#include <iostream>\nusing namespace std;\nint main() {\n  std::cout << "hi" << x;\n}\n```\n';
+      '# 标题\n\n| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n| 甲 | 乙 | 丙 |\n\n正文 <span style="font-size:24px">外层大字<u>嵌套下划线</u>尾部</span> 结束\n<u>纯下划线</u> <mark>纯荧光</mark> **加粗叠加<mark>荧光</mark>**\n\n```cpp\n#include <iostream>\nusing namespace std;\nint main() {\n  std::cout << "hi" << x;\n}\n```\n';
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: sample } });
     view.dispatch({ selection: { anchor: 0 } }); // 光标移到文档开头，所有标签应隐藏
     await new Promise((r) => setTimeout(r, 1500)); // 等嵌套语言懒加载
     let buildErr = null;
     try {
       buildMdDecos(view);
+      buildTableDecos(view);
     } catch (e) {
       buildErr = e && e.message ? e.message : String(e);
     }
     const counts = {};
-    for (const c of ['cm-line','cm-content','cm-fs','cm-u','cm-highlight','tok-kw','tok-kw2','tok-fn','tok-var','tok-type','tok-str','tok-mark','cm-code-line','cm-ln','cm-lang','tok-lang']) {
+    for (const c of ['cm-line','cm-content','cm-fs','cm-u','cm-highlight','tok-kw','tok-kw2','tok-fn','tok-var','tok-type','tok-str','tok-mark','cm-code-line','cm-ln','cm-lang','tok-lang','cm-table-wrap']) {
       counts[c] = document.querySelectorAll('.' + c).length;
     }
     // 检查行内 HTML 标签是否仍以文本形式出现在渲染 DOM 中（应全部隐藏）
@@ -1478,12 +2445,52 @@ if (location.search.indexOf('diag') !== -1) {
     for (const c of ['tok-kw2', 'tok-fn', 'tok-var', 'tok-type']) {
       texts[c] = Array.from(document.querySelectorAll('.' + c)).map((e) => e.textContent).slice(0, 6);
     }
+    // 表格链路自检：卡片渲染 → 卡片内输入同步源码 → Tab 聚焦跳格 → 按钮追加行
+    const tableCheck = { rendered: false, cellEditOk: false, tabOk: false, rowAppendOk: false };
+    const wrapEl = document.querySelector('.cm-table-wrap');
+    if (wrapEl) {
+      tableCheck.rendered = true;
+      // 卡片内编辑：聚焦 (0,1) 表头格 → 改文本 → 触发 input → 防抖后源码应更新
+      const editEl = wrapEl.querySelector('td[data-line="0"][data-col="1"] .cm-tb-edit');
+      if (editEl) {
+        editEl.focus();
+        editEl.textContent = '列2改';
+        editEl.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 500));
+        const headLine = view.state.doc.lineAt(
+          Math.min(tableLiveEdit ? tableLiveEdit.from : 0, view.state.doc.length - 1)
+        );
+        tableCheck.cellEditOk = headLine.text.includes('列2改');
+      }
+      // Tab：聚焦 (2,0) → Tab → 焦点应到 (2,1)
+      const cellA = wrapEl.querySelector('td[data-line="2"][data-col="0"] .cm-tb-edit');
+      if (cellA) {
+        cellA.focus();
+        cellA.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+        );
+        await new Promise((r) => setTimeout(r, 60));
+        const active = document.activeElement;
+        const td = active && active.closest && active.closest('td[data-line]');
+        tableCheck.tabOk = !!(td && td.dataset.line === '2' && td.dataset.col === '1');
+      }
+      await new Promise((r) => setTimeout(r, 500)); // 等防抖落盘
+      // 按钮追加行：模拟点击底部「＋ 行」
+      const btn = document.querySelector('.cm-tb-btn[data-op="row-append"]');
+      tableCheck.btnFound = !!btn;
+      if (btn) btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 150));
+      const tableNode = climbTableAt(view.state, wrapEl ? Number(wrapEl.dataset.tableFrom) : 0);
+      const tableBlock = tableNode && readTableBlock(view.state, tableNode);
+      tableCheck.rowAppendOk = !!(tableBlock && tableBlock.rows.length === 2 && tableBlock.rows[1].every((cell) => cell === ''));
+    }
     window.__diagResult = JSON.stringify({
       buildErr,
       docLength: view.state.doc.length,
       docLines: view.state.doc.lines,
       counts,
       tagVisible,
+      tableCheck,
       kw2Color: colorOf('.tok-kw2'),
       fnColor: colorOf('.tok-fn'),
       varColor: colorOf('.tok-var'),
@@ -1492,4 +2499,17 @@ if (location.search.indexOf('diag') !== -1) {
       texts,
     });
   })();
+  }, 100);
+  };
+  if (tableRenderOk) startDiag();
+  else {
+    // 等主进程的真实可见信号（诊断会显示并激活屏幕内的独立测试窗口）
+    const timer = setInterval(() => {
+      if (tableRenderOk) {
+        clearInterval(timer);
+        startDiag();
+      }
+    }, 50);
+    setTimeout(() => clearInterval(timer), 10000); // 兜底退出等待
+  }
 }

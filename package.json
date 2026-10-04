@@ -1,7 +1,7 @@
 {
   "name": "note-anywhere",
   "productName": "NoteAnywhere",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "description": "Alt+Q 呼出的灵感速记 — 顶置书写卡，收起即保存为 Markdown",
   "main": "main.js",
   "author": "noteanywhere",
@@ -9,7 +9,9 @@
   "scripts": {
     "bundle": "esbuild renderer/src/app.js --bundle --outfile=renderer/app.bundle.js --format=iife --target=chrome130 --minify",
     "start": "npm run bundle && electron .",
-    "smoke": "npm run bundle && electron . --smoke",
+    "smoke": "npm run bundle && electron tools/smoke-bootstrap.js --smoke",
+    "diag": "npm run bundle && electron tools/smoke-bootstrap.js --smoke --diag",
+    "test:tables": "node --test tools/table-gate.test.cjs && npm run bundle && electron tools/table-regression.js",
     "icon": "node tools/gen-icon.js",
     "dist": "npm run bundle && electron-builder"
   },

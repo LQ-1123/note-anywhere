@@ -480,6 +480,186 @@ body {
   color: var(--accent);
 }
 
+/* ---------- 表格卡片 ---------- */
+
+/* 卡片挂在表头行的行内组件位：inline-block 保持行内布局稳定 */
+.cm-table-wrap {
+  display: inline-block;
+  vertical-align: top;
+  margin: 4px 0 6px;
+  overflow-x: auto;
+  max-width: 100%;
+  width: max-content;
+  box-sizing: border-box;
+  overscroll-behavior-x: contain;
+  border: 1px solid var(--code-border);
+  border-radius: 8px;
+  user-select: none;
+}
+
+table.cm-table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  table-layout: fixed;
+}
+
+.cm-table td.cm-tb-head,
+.cm-table td.cm-tb-cell {
+  position: relative;
+  border: 1px solid var(--hairline);
+  padding: 0;
+  text-align: left;
+  vertical-align: top;
+  font-weight: normal;
+}
+
+/* 可编辑单元格：点击即输入，输入即同步回 Markdown 源码 */
+.cm-tb-edit {
+  padding: 5px 12px;
+  min-height: 1.75em;
+  line-height: 1.6;
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.cm-table td.cm-tb-cell:focus-within {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.cm-tb-head .cm-tb-edit {
+  background: var(--code-bg);
+  font-weight: 600;
+}
+
+/* 行首 gutter：悬停该行时浮出行操作 */
+.cm-tb-gutter {
+  border: none;
+  padding: 0;
+  width: 20px;
+  min-width: 20px;
+  background: transparent;
+  position: relative;
+}
+
+.cm-tb-rowops,
+.cm-tb-colops {
+  display: none;
+  align-items: center;
+  gap: 3px;
+}
+
+.cm-tb-resize {
+  position: absolute;
+  right: -4px;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+}
+
+.cm-tb-resize:hover,
+.cm-tb-resize:focus-visible,
+.cm-tb-resize.dragging {
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.cm-table-tip {
+  margin-left: auto;
+  align-self: center;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.cm-table tr:hover > td.cm-tb-gutter .cm-tb-rowops {
+  display: flex;
+  position: absolute;
+  inset: 0;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  background: var(--bg);
+}
+
+.cm-table td.cm-tb-head:hover .cm-tb-colops {
+  display: inline-flex;
+  position: absolute;
+  top: 2px;
+  right: 2px;
+}
+
+.cm-tb-btn {
+  appearance: none;
+  border: 1px solid var(--hairline);
+  background: var(--side);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  flex: none;
+}
+
+.cm-tb-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.cm-tb-btn[data-op$='-del']:hover {
+  color: #e05555;
+  border-color: #e05555;
+}
+
+/* 底部追加行/列（悬停整卡时出现） */
+.cm-table-foot {
+  display: none;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--hairline);
+}
+
+.cm-table-wrap:hover .cm-table-foot {
+  display: flex;
+}
+
+.cm-table-wrap:focus-within .cm-table-foot {
+  display: flex;
+}
+
+.cm-table-foot .cm-tb-btn {
+  width: auto;
+  height: auto;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  border-radius: 5px;
+}
+
+/* 源码编辑态：整表浅底标识正在编辑的表格 */
+.cm-table-line {
+  background: var(--code-bg);
+}
+
+/* 渲染态被隐藏的表格行（分隔行/数据行）：塌陷为 0 高，不留空洞 */
+.cm-table-hidden {
+  height: 0;
+  line-height: 0;
+  font-size: 0;
+  padding: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
 /* ---------- 右键格式菜单 ---------- */
 
 #ctx-menu {
@@ -558,6 +738,23 @@ body.theme-light .cm-highlight {
 .slash-item.sel {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+.slash-table-preview {
+  display: grid;
+  grid-template-columns: repeat(3, 9px);
+  gap: 2px;
+  margin-left: auto;
+}
+
+.slash-table-preview i {
+  height: 6px;
+  border: 1px solid currentColor;
+  opacity: 0.55;
+}
+
+.slash-table-preview i:nth-child(-n+3) {
+  background: currentColor;
 }
 
 .slash-hint {
