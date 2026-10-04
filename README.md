@@ -1,6 +1,15 @@
 # NoteAnywhere — 灵感速记
 
-按 **Alt+Q** 随时呼出一张顶置书写卡，记下灵感；再按 **Alt+Q** 收起，内容自动保存为 Markdown 文件。深浅主题跟随系统，界面克制，常驻系统托盘。基于 Electron + CodeMirror 6（与 Obsidian 同款编辑器内核）。
+按 **Alt+Q** 随时呼出一张顶置书写卡，记下灵感；再按 **Alt+Q** 收起，内容自动保存为 Markdown 文件。深浅主题跟随系统，界面克制，常驻系统托盘。编辑器内核是 CodeMirror 6（与 Obsidian 同款）。
+
+宿主层有两个实现，**渲染层完全共用**（`renderer/src/app.js` 一行不改，靠 `window.bridge` 对接）：
+
+| 宿主 | 产物 | 体积 | 说明 |
+| --- | --- | --- | --- |
+| **Tauri 2（Rust）** | `src-tauri/target/release/noteanywhere.exe` | **约 4.4 MB** | 单文件、走系统 WebView2；见 [src-tauri/README.md](src-tauri/README.md) |
+| Electron | `dist/NoteAnywhere-Setup-*.exe` | 约 106 MB（解包 369 MB） | 旧实现，暂时保留做对照 |
+
+两个宿主行为一致：全局热键、无边框置顶卡、托盘、单实例、开机自启、笔记读写与回收站删除、图片粘贴、搜索/标签/每日回顾、中文输入法组合态确认。
 
 ## 快捷键
 
@@ -133,6 +142,27 @@ npm run smoke      # 冒烟自检（编辑器初始化 / 新建页 / 笔记目�
 npm run diag       # 冒烟 + 渲染着色诊断（含表格卡片链路自检）
 node tools/tag-audit.mjs        # 语法 tag 覆盖审计
 ```
+
+### Tauri 版
+
+```bash
+npm run tauri:build   # = npm run bundle && cargo build --release --manifest-path src-tauri/Cargo.toml
+# 产物：src-tauri/target/release/noteanywhere.exe（前端在编译期嵌入 exe，发布无需带资源目录）
+```
+
+键鼠/输入法回归（通过 CDP 驱动 WebView2；Tauri 没有 `sendInputEvent`）：
+
+```bash
+# 启动时带调试端口
+set WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223
+noteanywhere.exe
+# 另一终端：11 项回归（4 项中文输入法 + 表格 + 列表 + 搜索/标签/回顾）
+node tools/tauri-regression.mjs
+```
+
+> 若 exe 放在权限受限的目录（本仓库开发时的工作区就是），WebView2 会起不来并报
+> `os error 5` / `0x800700AA`。这是目录 ACL 问题，用工作区外的 `CARGO_TARGET_DIR` 构建即可。
+> 详见 [src-tauri/README.md](src-tauri/README.md)。
 
 > 冒烟通过 `tools/smoke-bootstrap.js` 在独立 userData + 临时笔记目录中运行，
 > 不与常驻实例的单例锁/热键冲突，也不触碰真实笔记。远程桌面等无合成器的环境下
