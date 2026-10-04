@@ -175,10 +175,4 @@ impl Store {
     pub fn setting_i64(&self, key: &str, fallback: i64) -> i64 {
         self.settings.get(key).and_then(|v| v.as_i64()).unwrap_or(fallback)
     }
-    pub fn setting_bool(&self, key: &str, fallback: bool) -> bool {
-        self.settings
-            .get(key)
-            .and_then(|v| v.as_bool())
-            .unwrap_or(fallback)
-    }
 }

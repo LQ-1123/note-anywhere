@@ -212,6 +212,48 @@ await check('daily review surfaces an old note and typing dismisses it', async (
   await d.evaluate('window.__TAURI__.core.invoke("set_setting", { key: "reviewMode", value: "daily" })');
 });
 
+// ---------- 设置面板 / 主题 ----------
+await check('settings panel opens, reflects host settings and persists changes', async () => {
+  await d.mouse('#settings-btn');
+  await d.until('document.getElementById("settings-mask").hidden === false', '设置面板未打开', 2500);
+  const notesDir = await d.evaluate('document.getElementById("set-notesdir").textContent');
+  const version = await d.evaluate('document.getElementById("set-version").textContent');
+  assert.ok(notesDir.length > 0, '笔记目录未回填');
+  assert.ok(/v1\.\d/.test(version), '版本号未回填: ' + version);
+
+  const before = JSON.parse(await d.evaluate('(async () => JSON.stringify(await window.bridge.getSettings()))()')).fontSize;
+  await d.mouse('#set-font-plus');
+  await d.until(
+    `document.getElementById('set-font-size').textContent === '${before + 1}'`,
+    '字号未 +1',
+    2500
+  );
+  const after = JSON.parse(await d.evaluate('(async () => JSON.stringify(await window.bridge.getSettings()))()')).fontSize;
+  assert.equal(after, before + 1, '宿主持久化字号失败');
+  await d.mouse('#set-font-minus'); // 还原
+  await d.mouse('#settings-close');
+  await d.until('document.getElementById("settings-mask").hidden === true', '设置面板未关闭', 2500);
+});
+
+await check('theme switch reaches the renderer', async () => {
+  await d.evaluate(`window.bridge.setSetting('theme', 'dark')`);
+  await sleep(400);
+  assert.equal(
+    await d.evaluate(`document.body.classList.contains('theme-light')`),
+    false,
+    '切到深色后仍在浅色主题'
+  );
+  await d.evaluate(`window.bridge.setSetting('theme', 'light')`);
+  await sleep(400);
+  assert.equal(
+    await d.evaluate(`document.body.classList.contains('theme-light')`),
+    true,
+    '切到浅色未生效'
+  );
+  await d.evaluate(`window.bridge.setSetting('theme', 'system')`);
+  await sleep(300);
+});
+
 console.log(`TAURI ${fail ? 'FAIL ' + fail : 'OK'} (pass ${pass})`);
 if (d.logs.length) {
   const errs = d.logs.filter((l) => /error|Error|failed|Uncaught/.test(l)).slice(0, 8);
