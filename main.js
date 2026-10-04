@@ -140,6 +140,7 @@ function listPages() {
         path: p,
         title: pageTitle(p) || d.name.replace(/\.md$/i, ''),
         mtime,
+        tags: tagsOfFile(p).slice(0, 3), // 侧栏每行显示用，太多会挤掉标题
       };
     })
     .sort((a, b) => b.mtime - a.mtime);
@@ -800,28 +801,47 @@ ipcMain.handle('search-notes', (_e, payload) => {
 
 // #标签：只在「行首或空白之后」才算，避免命中 URL 锚点(https://x/#a)；
 // 纯十六进制且长度为 3/4/6/8 的（#fff / #ffffff / #333）按颜色值排除；
-// 围栏代码块内的 # 一律不算（多为注释或颜色）
+// 围栏代码块内的 # 一律不算（多为注释或颜色）。
+// 规则必须与渲染层的 scanTags 保持一致，否则界面与搜索会对不上。
 const TAG_RE = /(^|\s)#([\p{L}\p{N}_][\p{L}\p{N}_/-]*)/gu;
 const isColorTag = (tag) => /^[0-9a-fA-F]+$/.test(tag) && [3, 4, 6, 8].includes(tag.length);
+
+// 扫描一段文本里的标签；onTag 会在每次命中时被调用（用于计数）
+function scanTagsInText(text, onTag) {
+  let inFence = false;
+  for (const line of String(text || '').split('\n')) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    TAG_RE.lastIndex = 0;
+    let m;
+    while ((m = TAG_RE.exec(line))) {
+      const tag = m[2];
+      if (isColorTag(tag)) continue;
+      if (onTag) onTag(tag);
+    }
+  }
+}
+
+// 某一篇的标签（去重、按出现顺序），供侧栏文档列表显示
+function tagsOfFile(file) {
+  try {
+    const out = [];
+    scanTagsInText(fs.readFileSync(file, 'utf8'), (tag) => {
+      if (!out.includes(tag)) out.push(tag);
+    });
+    return out;
+  } catch {
+    return [];
+  }
+}
 
 ipcMain.handle('list-tags', () => {
   const counts = new Map();
   eachNote((file, text) => {
-    let inFence = false;
-    for (const line of text.split('\n')) {
-      if (/^\s*```/.test(line)) {
-        inFence = !inFence;
-        continue;
-      }
-      if (inFence) continue;
-      TAG_RE.lastIndex = 0;
-      let m;
-      while ((m = TAG_RE.exec(line))) {
-        const tag = m[2];
-        if (isColorTag(tag)) continue;
-        counts.set(tag, (counts.get(tag) || 0) + 1);
-      }
-    }
+    scanTagsInText(text, (tag) => counts.set(tag, (counts.get(tag) || 0) + 1));
   });
   const tags = [...counts.entries()]
     .map(([tag, count]) => ({ tag, count }))

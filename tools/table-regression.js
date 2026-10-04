@@ -555,6 +555,23 @@ app.whenReady().then(async () => {
       await read('document.getElementById("search-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
       await until('document.getElementById("search-mask").hidden === true', 'Esc did not close search');
     });
+    await check('sidebar page rows show their tags', async () => {
+      await mouse('#new-btn');
+      await until('document.querySelectorAll(".page-item").length > 0', 'sidebar list empty', 3000);
+      const rows = JSON.parse(
+        await read(`JSON.stringify(Array.from(document.querySelectorAll('.page-item')).map((el) => ({
+          path: el.dataset.path.split('\\\\').pop(),
+          tag: el.querySelector('.page-tag') ? el.querySelector('.page-tag').textContent : null,
+          more: el.querySelector('.page-tag-more') ? el.querySelector('.page-tag-more').textContent : null
+        })))`)
+      );
+      const tagged = rows.find((r) => r.path === '2026-10-01_10-00-00.md');
+      assert.ok(tagged && tagged.tag === '#nginx', 'sidebar row tag missing: ' + JSON.stringify(rows));
+      assert.equal(tagged.more, '+1', 'second tag should collapse to +1: ' + JSON.stringify(tagged));
+      // 没有标签的页不该凭空出现标签
+      const untagged = rows.find((r) => r.path === '2026-10-01_10-00-00.md' && r.tag === null);
+      assert.equal(untagged, undefined, 'unexpected untagged marker');
+    });
     // ---------- 每日回顾 ----------
     await check('daily review surfaces an old note, falls back a tier, and typing dismisses it', async () => {
       const notesDir = path.join(app.getPath('userData'), 'notes');

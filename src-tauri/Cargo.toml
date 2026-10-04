@@ -1,6 +1,6 @@
 [package]
 name = "noteanywhere"
-version = "1.9.3"
+version = "1.9.4"
 edition = "2021"
 description = "Alt+Q 呼出的灵感速记 — 顶置书写卡，收起即保存为 Markdown"
 authors = ["LQ-1123"]

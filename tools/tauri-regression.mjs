@@ -1,6 +1,8 @@
 // Tauri 版的键鼠/输入法回归：用 CDP 驱动 WebView2 里的真实前端。
 // 用例与 tools/table-regression.js 的 Electron 版一一对应，用来验证"宿主换掉后行为不变"。
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Driver, sleep } from './tauri-driver.mjs';
 
 const FIRST_CELL = '.cm-table-wrap td[data-line="0"][data-col="0"] .cm-tb-edit';
@@ -220,6 +222,19 @@ await check('tag bar under the note shows only this note tags and searches on cl
 
 // ---------- 每日回顾 ----------
 await check('daily review surfaces an old note and typing dismisses it', async () => {
+  // 自己造一篇「一年前的今天」：回归要能独立重复运行，不能依赖上一轮遗留的文件
+  const paths = JSON.parse(
+    await d.evaluate('(async () => JSON.stringify(await window.__TAURI__.core.invoke("debug_paths")))()')
+  );
+  const d0 = new Date();
+  d0.setFullYear(d0.getFullYear() - 1);
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const seeded = path.join(paths.notesDir, `${d0.getFullYear()}-${pad2(d0.getMonth() + 1)}-${pad2(d0.getDate())}_09-00-00.md`);
+  fs.mkdirSync(paths.notesDir, { recursive: true });
+  if (!fs.existsSync(seeded)) {
+    fs.writeFileSync(seeded, '# 一年前的今天\n\n并发写的风险：两个进程同时改同一个配置文件。\n\n#旧标签\n', 'utf8');
+  }
+
   await d.evaluate('window.__TAURI__.core.invoke("set_setting", { key: "reviewMode", value: "always" })');
   await d.evaluate('window.__TAURI__.core.invoke("hide_window")');
   await sleep(500);
@@ -275,6 +290,23 @@ await check('theme switch reaches the renderer', async () => {
   );
   await d.evaluate(`window.bridge.setSetting('theme', 'system')`);
   await sleep(300);
+});
+
+await check('sidebar page rows show their tags', async () => {
+  await d.mouse('.cm-content');
+  await d.insertText('# 带标签的一页\n\n这里有 #侧栏标签 和 #第二个标签。\n');
+  await sleep(1300); // 等落盘 + 侧栏刷新
+  const rows = JSON.parse(
+    await d.evaluate(`JSON.stringify(Array.from(document.querySelectorAll('.page-item')).map((el) => ({
+      title: el.querySelector('.page-title') ? el.querySelector('.page-title').textContent : null,
+      tag: el.querySelector('.page-tag') ? el.querySelector('.page-tag').textContent : null,
+      more: el.querySelector('.page-tag-more') ? el.querySelector('.page-tag-more').textContent : null
+    })))`)
+  );
+  const row = rows.find((r) => r.title === '带标签的一页');
+  assert.ok(row, '刚写的页未出现在侧栏: ' + JSON.stringify(rows.slice(0, 6)));
+  assert.equal(row.tag, '#侧栏标签', '侧栏行标签不对: ' + JSON.stringify(row));
+  assert.equal(row.more, '+1', '第二个标签应折叠成 +1: ' + JSON.stringify(row));
 });
 
 console.log(`TAURI ${fail ? 'FAIL ' + fail : 'OK'} (pass ${pass})`);

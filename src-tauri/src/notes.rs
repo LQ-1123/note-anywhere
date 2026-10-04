@@ -144,7 +144,12 @@ pub fn list_pages(store: &Store) -> Value {
             pages.push(json!({
                 "path": path.to_string_lossy(),
                 "title": title,
-                "mtime": mtime
+                "mtime": mtime,
+                // 侧栏每行显示用；太多会挤掉标题，取前 3 个
+                "tags": crate::search::tags_of(&fs::read_to_string(&path).unwrap_or_default())
+                    .into_iter()
+                    .take(3)
+                    .collect::<Vec<String>>()
             }));
         }
     }

@@ -2643,6 +2643,25 @@ async function refreshList() {
 
     item.appendChild(meta);
 
+    // 侧栏每行显示这篇的标签（宿主随 listPages 一起给出）；多于一个时补 +N
+    const pageTags = Array.isArray(page.tags) ? page.tags : [];
+    if (pageTags.length) {
+      const wrap = document.createElement('div');
+      wrap.className = 'page-tags';
+      wrap.title = pageTags.map((t) => '#' + t).join(' ');
+      const chip = document.createElement('span');
+      chip.className = 'page-tag';
+      chip.textContent = '#' + pageTags[0];
+      wrap.appendChild(chip);
+      if (pageTags.length > 1) {
+        const more = document.createElement('span');
+        more.className = 'page-tag-more';
+        more.textContent = '+' + (pageTags.length - 1);
+        wrap.appendChild(more);
+      }
+      item.appendChild(wrap);
+    }
+
     const del = document.createElement('button');
     del.className = 'page-del';
     del.title = '删除这一页';

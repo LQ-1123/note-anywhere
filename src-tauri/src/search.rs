@@ -84,7 +84,9 @@ fn is_color_tag(tag: &str) -> bool {
     tag.chars().all(|c| c.is_ascii_hexdigit()) && matches!(tag.len(), 3 | 4 | 6 | 8)
 }
 
-fn scan_line_tags(line: &str, out: &mut HashMap<String, i64>) {
+/// 扫一行里的标签（按出现顺序，可能重复）
+fn scan_line_tag_list(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0usize;
     while i < chars.len() {
@@ -97,7 +99,7 @@ fn scan_line_tags(line: &str, out: &mut HashMap<String, i64>) {
                 }
                 let tag: String = chars[i + 1..j].iter().collect();
                 if !is_color_tag(&tag) {
-                    *out.entry(tag).or_insert(0) += 1;
+                    out.push(tag);
                 }
                 i = j;
                 continue;
@@ -105,22 +107,46 @@ fn scan_line_tags(line: &str, out: &mut HashMap<String, i64>) {
         }
         i += 1;
     }
+    out
+}
+
+/// 跳过围栏代码块，逐行交给 f
+fn each_tag_line<F: FnMut(&str)>(text: &str, mut f: F) {
+    let mut in_fence = false;
+    for line in text.split('\n') {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        f(line);
+    }
+}
+
+/// 一段文本里的标签（去重、按出现顺序）。侧栏文档列表与渲染层都按这个顺序显示。
+pub fn tags_of(text: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    each_tag_line(text, |line| {
+        for tag in scan_line_tag_list(line) {
+            if seen.insert(tag.clone()) {
+                out.push(tag);
+            }
+        }
+    });
+    out
 }
 
 pub fn list_tags(store: &Store) -> Value {
     let mut counts: HashMap<String, i64> = HashMap::new();
     each_note(store, |_file, text, _mtime| {
-        let mut in_fence = false;
-        for line in text.split('\n') {
-            if line.trim_start().starts_with("```") {
-                in_fence = !in_fence;
-                continue;
+        each_tag_line(text, |line| {
+            for tag in scan_line_tag_list(line) {
+                *counts.entry(tag).or_insert(0) += 1;
             }
-            if in_fence {
-                continue;
-            }
-            scan_line_tags(line, &mut counts);
-        }
+        });
     });
     let mut tags: Vec<(String, i64)> = counts.into_iter().collect();
     tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
