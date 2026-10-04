@@ -1,6 +1,5 @@
 // 冒烟/诊断专用启动器：独立 userData + 临时笔记目录，
-// 避开常驻实例的单例锁，也不触碰真实笔记。
-// 用法：npx electron tools/smoke-bootstrap.js --smoke [--diag]
+// 避开常驻实例的单例锁，也不触碰真实笔记（用法：npx electron tools/smoke-bootstrap.js --smoke [--diag]）
 const { app } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -25,7 +24,7 @@ if (process.env.SMOKE_CPUPROF === '1') {
 
 fs.writeFileSync(
   path.join(tmp, 'config.json'),
-  // 热键换成不会与运行中的正式实例冲突的组合，避免冒烟时被单例锁挡住
+  // 热键换成不会与运行中的正式实例冲突的组合，避免冒烟时弹原生错误框卡住
   JSON.stringify({ notesDir: path.join(tmp, 'notes'), hotkey: 'Ctrl+Alt+Shift+F23' }),
   'utf8'
 );
@@ -35,8 +34,11 @@ if (['1', 'hidden'].includes(process.env.SMOKE_USER_PROBE)) {
   const notesDir = path.join(tmp, 'notes');
   fs.mkdirSync(notesDir, { recursive: true });
   const noteFile = path.join(notesDir, '2026-10-04_10-00-00.md');
-  const tableNote = '# 表格笔记\n\n| 列 | 列 | 列 |\n| --- | --- | --- |\n| 甲 | 乙 | 丙 |\n| 丁 | 戊 | 己 |\n\n结尾段落\n';
-  fs.writeFileSync(noteFile, tableNote, 'utf8');
+  fs.writeFileSync(
+    noteFile,
+    '# 表格笔记\n\n| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n| 甲 | 乙 | 丙 |\n| 丁 | 戊 | 己 |\n\n结尾段落\n',
+    'utf8'
+  );
   fs.writeFileSync(path.join(tmp, 'state.json'), JSON.stringify({ file: noteFile, caret: 5 }), 'utf8');
   setTimeout(async () => {
     try {
@@ -44,7 +46,11 @@ if (['1', 'hidden'].includes(process.env.SMOKE_USER_PROBE)) {
       const wins = electron.BrowserWindow.getAllWindows();
       // 复刻用户呼出窗口：show 后立刻推送 restore（含表格文档）
       if (process.env.SMOKE_USER_PROBE !== 'hidden') wins[0].show();
-      wins[0].webContents.send('restore', { text: tableNote, caret: 0, file: noteFile });
+      wins[0].webContents.send('restore', {
+        text: '# 表格笔记\n\n| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n| 甲 | 乙 | 丙 |\n| 丁 | 戊 | 己 |\n\n结尾段落\n',
+        caret: 0,
+        file: noteFile,
+      });
       await new Promise((r) => setTimeout(r, 3000));
       const res = await Promise.race([
         wins[0].webContents.executeJavaScript(

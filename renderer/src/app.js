@@ -2161,6 +2161,7 @@ function fillSettings(s) {
   document.getElementById('set-indentdots').checked = s.indentDots !== false;
   document.getElementById('set-alwaysontop').checked = s.alwaysOnTop !== false;
   segSet('set-reviewmode', s.reviewMode || 'daily');
+  segSet('set-reviewdays', String(s.reviewMinDays || 7));
   document.getElementById('set-version').textContent = 'NoteAnywhere v' + s.version;
 }
 
@@ -2266,6 +2267,11 @@ document.getElementById('set-reviewmode').addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   bridge.setSetting('reviewMode', b.dataset.v).then((r) => r && r.ok && segSet('set-reviewmode', b.dataset.v));
+});
+document.getElementById('set-reviewdays').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  bridge.setSetting('reviewMinDays', Number(b.dataset.v)).then((r) => r && r.ok && segSet('set-reviewdays', b.dataset.v));
 });
 
 // 开关类

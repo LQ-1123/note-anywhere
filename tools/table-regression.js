@@ -597,6 +597,42 @@ app.whenReady().then(async () => {
       await delay(900);
       assert.ok(!fs.existsSync(victim), 'a loaded-then-emptied note should still be cleaned up');
     });
+    await check('review threshold is configurable from settings', async () => {
+      const notesDir = path.join(app.getPath('userData'), 'notes');
+      const pad = (n) => String(n).padStart(2, '0');
+      const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      const d3 = new Date();
+      d3.setDate(d3.getDate() - 3);
+      const recent = path.join(notesDir, `${ymd(d3)}_07-00-00.md`);
+      fs.writeFileSync(recent, '# 三天前的笔记\n\n只过了三天。', 'utf8');
+
+      // 把其它笔记全部 exclude，结果就只可能来自「三天前」这一篇
+      const others = fs
+        .readdirSync(notesDir)
+        .filter((f) => f.toLowerCase().endsWith('.md'))
+        .map((f) => path.join(notesDir, f))
+        .filter((f) => f !== recent);
+      const ask = () =>
+        read(`(async () => { const r = await window.bridge.reviewNote(${JSON.stringify(others)}); return r.note ? r.note.file : null; })()`);
+
+      await read('window.bridge.setSetting("reviewMinDays", 7)');
+      await delay(250);
+      assert.equal(await ask(), null, 'a 3-day-old note must not pass the 7-day threshold');
+
+      const res = await read('window.bridge.setSetting("reviewMinDays", 1)');
+      assert.equal(res && res.ok, true, 'setting reviewMinDays=1 was rejected: ' + JSON.stringify(res));
+      await delay(250);
+      assert.equal(
+        path.basename(String(await ask())),
+        path.basename(recent),
+        'threshold 1 day did not admit a 3-day-old note'
+      );
+
+      const bad = await read('window.bridge.setSetting("reviewMinDays", 999)');
+      assert.equal(bad && bad.ok, false, 'an out-of-range threshold was accepted');
+
+      await read('window.bridge.setSetting("reviewMinDays", 7)'); // 复位
+    });
     console.log('TABLE-OK');
     try { if (originalClipboard) require('electron').clipboard.writeText(originalClipboard); else require('electron').clipboard.clear(); } catch {}
     clearTimeout(watchdog);

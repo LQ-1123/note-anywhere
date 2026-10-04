@@ -1116,6 +1116,11 @@ body.theme-light .cm-highlight {
   color: var(--accent);
 }
 
+/* 选项较多时收紧内边距，避免撑破设置行 */
+.seg.compact button {
+  padding: 5px 8px;
+}
+
 /* 步进器 */
 .stepper {
   display: flex;

@@ -59,6 +59,7 @@ const DEFAULT_SETTINGS = {
   indentDots: true,
   alwaysOnTop: true,
   reviewMode: 'daily', // off | daily | always
+  reviewMinDays: 7, // 回顾门槛：多少天前的笔记才参与回顾
 };
 const settings = {};
 for (const k of Object.keys(DEFAULT_SETTINGS)) {
@@ -571,6 +572,13 @@ ipcMain.handle('set-setting', (_e, { key, value }) => {
       win.webContents.send('settings-changed', settings);
       return { ok: true };
     }
+    case 'reviewMinDays': {
+      if (!REVIEW_MIN_DAYS_CHOICES.includes(value)) return { ok: false };
+      settings.reviewMinDays = value;
+      persistConfig();
+      win.webContents.send('settings-changed', settings);
+      return { ok: true };
+    }
     default:
       return { ok: false };
   }
@@ -841,7 +849,8 @@ ipcMain.handle('open-page-at', async (_e, payload) => {
 // 完全不用读全文、不建索引、不联网。回看历史笔记必须按创建日期而不是 mtime——
 // 改一下去年的笔记 mtime 就变新了，用它筛会让旧笔记"变年轻"。
 
-const REVIEW_MIN_AGE_DAYS = 7; // 太新的笔记不值得回顾
+// 回顾门槛（多少天前的笔记才参与回顾）由设置决定，这里只列候选档位
+const REVIEW_MIN_DAYS_CHOICES = [1, 3, 7, 14, 30];
 const REVIEW_COOLDOWN_DAYS = 30; // 刚回顾过的先放一放
 // 凌晨 4 点前算前一天：速记用户常熬夜，半夜写的笔记不该立刻被踢出回顾池
 const REVIEW_DAY_CUTOFF_HOUR = 4;
@@ -909,12 +918,15 @@ function pickReviewNote(exclude, nowMs) {
   const today = logicalToday(now);
   const reviews = loadReviews();
   const excluded = new Set((Array.isArray(exclude) ? exclude : []).map((f) => path.basename(String(f))));
+  const minDays = REVIEW_MIN_DAYS_CHOICES.includes(settings.reviewMinDays)
+    ? settings.reviewMinDays
+    : DEFAULT_SETTINGS.reviewMinDays;
   const pool = [];
   eachNote((file, text) => {
     const created = noteCreatedAt(path.basename(file));
     if (!created) return;
     const ageDays = Math.round((today - dayStart(created)) / 86400000);
-    if (ageDays < REVIEW_MIN_AGE_DAYS) return;
+    if (ageDays < minDays) return;
     pool.push({ file, text, created, ageDays });
   });
   if (!pool.length) return null;
