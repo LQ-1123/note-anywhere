@@ -417,6 +417,13 @@ app.whenReady().then(async () => {
       await delay(350);
       const marks = await read('Array.from(document.querySelectorAll(".cm-ol-marker")).map(e => e.textContent)');
       assert.deepEqual(marks, ['1.', 'a.', 'b.', 'i.', '2.'], 'nested numbering: ' + JSON.stringify(marks));
+      // 光标停在某个列表行上时，该行也要显示层级记号，不能退回源码数字
+      // （源码里第二层写的是 1.，显示层是 a.；只按「整行是否在编辑态」判断会退回 1.）
+      await key('Home', ['control']);
+      await key('Down');
+      await delay(300);
+      const onLine = await read('Array.from(document.querySelectorAll(".cm-ol-marker")).map(e => e.textContent)');
+      assert.ok(onLine.includes('a.'), 'caret on a nested line hid its level marker: ' + JSON.stringify(onLine));
       assert.equal(await read('document.querySelectorAll(".cm-bullet").length'), 2, 'bullets replaced by numbers');
       assert.equal(await read('document.querySelectorAll(".cm-dot").length'), 0, 'indent dots drawn on list lines');
     });

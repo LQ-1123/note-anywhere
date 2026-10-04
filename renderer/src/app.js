@@ -1112,16 +1112,18 @@ function buildMdDecos(view) {
         return;
       }
       if (name === 'ListMark') {
-        if (lineInactive(st, head, from)) {
-          const mark = st.doc.sliceString(from, to);
-          // 有序列表（1. / 1)）保留数字并做多级显示编号，不再一律画成 •
-          if (/^\d+[.)]$/.test(mark)) {
+        const mark = st.doc.sliceString(from, to);
+        if (/^\d+[.)]$/.test(mark)) {
+          // 有序列表：显示层的多级编号与源码数字常常不同（源码 2. 显示 a.），
+          // 所以不能等「整行不在编辑态」才替换，否则光标停在这一行时，
+          // 刚按完 Tab 看到的还是源码 2.。改为按「光标是否落在记号内部」判断。
+          if (!(head > from && head < to)) {
             inline.push(
               Decoration.replace({ widget: new OrderedMarkWidget(orderedListMarker(ref.node, mark)) }).range(from, to)
             );
-          } else {
-            inline.push(Decoration.replace({ widget: new BulletWidget() }).range(from, to));
           }
+        } else if (lineInactive(st, head, from)) {
+          inline.push(Decoration.replace({ widget: new BulletWidget() }).range(from, to));
         }
         return;
       }
