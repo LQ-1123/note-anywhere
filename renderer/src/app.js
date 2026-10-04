@@ -888,6 +888,78 @@ function lineInactive(st, head, pos) {
   return head < line.from || head > line.to;
 }
 
+// ---------- 图片 ----------
+
+// ![alt](src)、![alt](<带空格的 src>)、![alt](src "标题")
+function parseImageMarkdown(raw) {
+  const m = /^!\[([^\]]*)\]\(\s*(?:<([^>]*)>|([^\s)]+?))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)$/.exec(raw);
+  if (!m) return null;
+  const src = (m[2] !== undefined ? m[2] : m[3] || '').trim();
+  if (!src) return null;
+  return { alt: m[1] || '', src };
+}
+
+function normalizePath(p) {
+  const s = String(p).replace(/\\/g, '/');
+  const lead = s.startsWith('/') ? '/' : '';
+  const out = [];
+  for (const seg of s.split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') { out.pop(); continue; }
+    out.push(seg);
+  }
+  return lead + out.join('/');
+}
+
+function fileUrlOf(absPath) {
+  let p = normalizePath(absPath);
+  if (/^[a-zA-Z]:/.test(p)) p = '/' + p;
+  if (!p.startsWith('/')) p = '/' + p;
+  return 'file://' + encodeURI(p).replace(/[?#]/g, (c) => '%' + c.charCodeAt(0).toString(16));
+}
+
+// 网络地址原样用；本地绝对路径直接转 file://；相对路径按当前笔记所在目录解析
+function resolveImageSrc(src) {
+  const s = String(src || '').trim();
+  if (!s) return '';
+  if (/^(https?|data|blob|file):/i.test(s)) return s;
+  if (/^[a-zA-Z]:[\\/]/.test(s) || s.startsWith('\\\\')) return fileUrlOf(s);
+  const file = String(currentFile || '').replace(/\\/g, '/');
+  const cut = file.lastIndexOf('/');
+  if (cut === -1 || s.startsWith('/')) return fileUrlOf(s);
+  return fileUrlOf(file.slice(0, cut) + '/' + s);
+}
+
+class ImageWidget extends WidgetType {
+  constructor(src, alt) {
+    super();
+    this.src = src;
+    this.alt = alt;
+  }
+  eq(other) {
+    return other.src === this.src && other.alt === this.alt;
+  }
+  toDOM() {
+    const box = document.createElement('span');
+    box.className = 'cm-image';
+    const img = document.createElement('img');
+    img.src = this.src;
+    img.alt = this.alt;
+    img.draggable = false;
+    img.addEventListener('error', () => {
+      if (box.classList.contains('cm-image-broken')) return;
+      box.classList.add('cm-image-broken');
+      const tip = document.createElement('span');
+      tip.className = 'cm-image-tip';
+      tip.textContent = (this.alt ? this.alt + ' · ' : '') + '图片无法加载';
+      box.appendChild(tip);
+    });
+    box.appendChild(img);
+    return box;
+  }
+  ignoreEvent() { return false; } // 点一下把光标放进该节点 → 直接看到 ![]() 源码去修改
+}
+
 function buildMdDecos(view) {
   const st = view.state;
   const head = st.selection.main.head;
@@ -943,6 +1015,27 @@ function buildMdDecos(view) {
         if (lineInactive(st, head, from)) {
           inline.push(Decoration.replace({ widget: new BulletWidget() }).range(from, to));
         }
+        return;
+      }
+      if (name === 'Image') {
+        // 光标在图片节点内 → 显示 ![]() 源码；在外 → 渲染成真实图片
+        if (head < from || head > to) {
+          const parsed = parseImageMarkdown(st.doc.sliceString(from, to));
+          if (parsed) {
+            inline.push(
+              Decoration.replace({
+                widget: new ImageWidget(resolveImageSrc(parsed.src), parsed.alt),
+              }).range(from, to)
+            );
+            return false; // 整段已被组件替换，不再进子节点
+          }
+        }
+        return;
+      }
+      // 链接：光标在外时整段加可点击样式（Ctrl/Cmd+点击跳转）；
+      // 不剪枝，子节点仍按原规则隐藏 [] () 与 URL
+      if ((name === 'Link' || name === 'Autolink') && (head < from || head > to)) {
+        inline.push(Decoration.mark({ class: 'cm-link' }).range(from, to));
         return;
       }
 
@@ -1347,7 +1440,22 @@ function renderSlash() {
     slashMenu.appendChild(row);
   });
   slashMenu.style.display = 'block';
+  scrollSlashSelectionIntoView();
   positionSlash();
+}
+
+// 列表重建会把 scrollTop 归零，这里把选中项重新带回可视区（↑↓ 时列表跟着翻）
+function scrollSlashSelectionIntoView() {
+  const row = slashMenu.children[slash.selected];
+  if (!row) return;
+  const pad = 4; // 与 #slash-menu 的 padding 对齐，留一点余量
+  const top = row.offsetTop - pad;
+  const bottom = row.offsetTop + row.offsetHeight + pad;
+  if (top < slashMenu.scrollTop) {
+    slashMenu.scrollTop = Math.max(0, top);
+  } else if (bottom > slashMenu.scrollTop + slashMenu.clientHeight) {
+    slashMenu.scrollTop = bottom - slashMenu.clientHeight;
+  }
 }
 
 function positionSlash() {
@@ -1738,6 +1846,41 @@ editorHost.addEventListener('mousedown', (e) => {
 // 滚动 / 窗口失焦时收起斜杠菜单
 view.scrollDOM.addEventListener('scroll', closeSlash, true);
 window.addEventListener('blur', closeSlash);
+
+// ---------- 链接跳转（Ctrl/Cmd + 点击） ----------
+
+function linkNodeAt(st, pos) {
+  let node = syntaxTree(st).resolveInner(pos, 1);
+  while (node) {
+    if (node.name === 'Link' || node.name === 'Autolink') return node;
+    node = node.parent;
+  }
+  return null;
+}
+
+// 从链接源码里取目标地址：<https://x>、[文字](https://x "标题")、[文字](<带 空格>)
+function linkTargetOf(st, node) {
+  const raw = st.doc.sliceString(node.from, node.to).trim();
+  const angle = /^<([^>]+)>$/.exec(raw);
+  if (angle) return angle[1].trim();
+  const md = /^\[[^\]]*\]\(\s*(?:<([^>]*)>|([^\s)]+?))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)$/.exec(raw);
+  if (md) return (md[1] !== undefined ? md[1] : md[2] || '').trim();
+  return '';
+}
+
+// 命中链接时在这里拦下来：交给主进程决定用浏览器还是系统默认程序打开
+editorHost.addEventListener('mousedown', (event) => {
+  if (event.button !== 0 || !(event.ctrlKey || event.metaKey)) return;
+  const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+  if (pos == null) return;
+  const node = linkNodeAt(view.state, pos);
+  if (!node) return;
+  const target = linkTargetOf(view.state, node);
+  if (!target) return;
+  event.preventDefault();
+  event.stopPropagation();
+  bridge.openLink(target);
+}, true);
 
 // ---------- 主题（跟随系统，由主进程推送） ----------
 

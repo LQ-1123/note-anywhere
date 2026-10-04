@@ -12,6 +12,7 @@ const {
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { fileURLToPath } = require('url');
 
 const IS_SMOKE = process.argv.includes('--smoke');
 const IS_DIAG = process.argv.includes('--diag');
@@ -561,6 +562,40 @@ ipcMain.handle('open-path', (_e, p) => {
     shell.openPath(app.getPath('userData'));
   }
   return { ok: true };
+});
+
+// 链接跳转（渲染端 Ctrl/Cmd+点击触发）：网络地址交给系统浏览器，
+// 本地路径按「当前笔记所在目录」解析后用系统默认程序打开，文件不存在则不动作。
+ipcMain.handle('open-link', async (_e, raw) => {
+  const url = typeof raw === 'string' ? raw.trim() : '';
+  if (!url) return { ok: false };
+  if (/^https?:\/\//i.test(url) || /^mailto:/i.test(url)) {
+    try {
+      await shell.openExternal(url);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  }
+  if (url.startsWith('#')) return { ok: false }; // 文内锚点暂不支持
+  // 其它协议不处理；注意别把 Windows 盘符（D:\... / D:/...）误当成协议
+  const isLocalPath = /^[a-zA-Z]:[\\/]/.test(url) || url.startsWith('\\\\');
+  if (!isLocalPath && /^[a-z][a-z0-9+.-]*:/i.test(url) && !/^file:/i.test(url)) return { ok: false };
+
+  const cut = url.search(/[?#]/);
+  const target = cut === -1 ? url : url.slice(0, cut);
+  let localPath;
+  try {
+    localPath = /^file:/i.test(target) ? fileURLToPath(target) : decodeURIComponent(target);
+  } catch {
+    return { ok: false };
+  }
+  const st = loadState();
+  const base = st.file ? path.dirname(st.file) : NOTES_DIR;
+  const abs = path.resolve(base, localPath);
+  if (!fs.existsSync(abs)) return { ok: false, error: '文件不存在' };
+  const failure = await shell.openPath(abs);
+  return failure ? { ok: false, error: failure } : { ok: true };
 });
 
 ipcMain.handle('list-pages', () => listPages());

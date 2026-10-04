@@ -1,7 +1,7 @@
 {
   "name": "note-anywhere",
   "productName": "NoteAnywhere",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Alt+Q 呼出的灵感速记 — 顶置书写卡，收起即保存为 Markdown",
   "main": "main.js",
   "author": "noteanywhere",

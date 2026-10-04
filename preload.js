@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('bridge', {
   pickNotesDir: () => ipcRenderer.invoke('pick-notes-dir'),
   resetWindow: () => ipcRenderer.invoke('reset-window'),
   openPath: (p) => ipcRenderer.invoke('open-path', p),
+  openLink: (url) => ipcRenderer.invoke('open-link', url),
   save: (text, caret) => ipcRenderer.send('save', { text, caret }),
   hide: () => ipcRenderer.send('hide'),
   newPage: () => ipcRenderer.send('new-page'),

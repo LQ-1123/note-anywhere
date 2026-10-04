@@ -1190,3 +1190,46 @@ body.theme-light .cm-highlight {
   transform: translateX(14px);
   background: var(--accent);
 }
+
+/* ---------- 链接与图片 ---------- */
+
+/* 链接渲染态：可点击（Ctrl/Cmd + 点击跳转） */
+.cm-link {
+  text-decoration: underline;
+  text-decoration-color: var(--faint);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.cm-link:hover {
+  text-decoration-color: var(--accent);
+}
+
+/* 图片渲染态 */
+.cm-image {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+
+.cm-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: var(--hover);
+}
+
+.cm-image-broken img {
+  display: none;
+}
+
+.cm-image-tip {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px dashed var(--hairline);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
