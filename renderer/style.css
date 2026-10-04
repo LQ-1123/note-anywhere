@@ -1374,8 +1374,14 @@ body.theme-light .cm-highlight {
 
 #search-box-icon {
   flex: none;
-  font-size: 11px;
-  opacity: 0.7;
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+  transition: color 0.12s;
+}
+
+#search-box:focus-within #search-box-icon {
+  color: var(--accent);
 }
 
 #search-input {
