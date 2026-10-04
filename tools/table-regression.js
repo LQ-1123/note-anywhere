@@ -572,6 +572,31 @@ app.whenReady().then(async () => {
       const picked = await read('(async () => { const r = await window.bridge.reviewNote([]); return r.note ? r.note.file : ""; })()');
       assert.ok(!String(picked).includes(ymd(today)), 'today note was picked for review: ' + picked);
     });
+    // ---------- 数据安全：空编辑器绝不能删掉「没载入过」的笔记 ----------
+    // 真实事故：应用开机自启常驻托盘，退出时 before-quit 会 flushEditor()，
+    // 此时若书写卡这次没被呼出过，编辑器就是空的、而 state.json 仍指向上一篇笔记，
+    // 于是那篇笔记被 unlinkSync 永久删除（不进回收站）。
+    await check('an empty editor never deletes a note that was never loaded', async () => {
+      const notesDir = path.join(app.getPath('userData'), 'notes');
+      const statePath = path.join(app.getPath('userData'), 'state.json');
+      const victim = path.join(notesDir, '2026-09-09_09-09-09.md');
+      fs.mkdirSync(notesDir, { recursive: true });
+      fs.writeFileSync(victim, '# 不该被删的笔记\n\n这篇有内容。', 'utf8');
+
+      // 复刻事故现场：state.json 指向它，但渲染层从未载入过它（编辑器为空）
+      const st = JSON.parse(fs.readFileSync(statePath, 'utf8') || '{}');
+      fs.writeFileSync(statePath, JSON.stringify({ ...st, file: victim, caret: 0 }), 'utf8');
+      await read('window.bridge.save("", 0)');
+      await delay(500);
+      assert.ok(fs.existsSync(victim), 'a note that was never loaded got deleted by an empty save');
+
+      // 反过来：确实载入过、又清空了的页，仍应被回收（原有行为不能丢）
+      await read(`window.bridge.openPage(${JSON.stringify(victim)})`);
+      await delay(700);
+      await read('window.bridge.save("", 0)');
+      await delay(900);
+      assert.ok(!fs.existsSync(victim), 'a loaded-then-emptied note should still be cleaned up');
+    });
     console.log('TABLE-OK');
     try { if (originalClipboard) require('electron').clipboard.writeText(originalClipboard); else require('electron').clipboard.clear(); } catch {}
     clearTimeout(watchdog);

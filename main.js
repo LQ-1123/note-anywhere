@@ -25,6 +25,11 @@ let win = null;
 let tray = null;
 let quitting = false;
 let pageReady = false;
+// 渲染层当前真正持有的是哪一页的内容（null = 编辑器是空的、还没载入任何一页）。
+// 用来区分「用户把这一页清空了」和「这一页只是还没 restore 过来」——
+// 后者如果当成空页清理，会把用户的笔记误删（真实发生过：开机自启常驻托盘，
+// 退出时 before-quit 会 flush，此时编辑器还空着，state.file 指向的笔记就被删了）。
+let loadedFile = null;
 
 // ---------- 配置与状态 ----------
 
@@ -140,14 +145,16 @@ function listPages() {
   return { pages, current: st.file || null };
 }
 
-// 保存当前页：空内容则删除文件并清掉指向，非空则落盘并记住该页光标
+// 保存当前页：空内容则回收文件并清掉指向，非空则落盘并记住该页光标
 function writeCurrentPage(text, caret) {
   const st = loadState();
   if (!String(text || '').trim()) {
-    if (st.file && fs.existsSync(st.file)) {
-      try { fs.unlinkSync(st.file); } catch {}
+    // 只有「这一页确实载入过」时，编辑器为空才说明用户把它清空了。
+    // 没载入过（刚启动还没 restore 就 flush）时编辑器本来就是空的，此时绝不能删文件。
+    if (st.file && st.file === loadedFile && fs.existsSync(st.file)) {
+      void trashFile(st.file);
+      saveState({ ...st, file: null, caret: 0 });
     }
-    saveState({ ...st, file: null, caret: 0 });
     return;
   }
   ensureNotesDir();
@@ -240,8 +247,21 @@ async function flushEditor() {
 }
 
 function sendRestore(text, caret, file) {
+  loadedFile = file || null; // 记住渲染层即将持有哪一页
   const send = () => win.webContents.send('restore', { text, caret, file });
   pageReady ? send() : win.webContents.once('did-finish-load', send);
+}
+
+// 删笔记一律走系统回收站，误删还能捞回来（unlinkSync 是永久删除，不进回收站）
+function trashFile(file) {
+  try {
+    return Promise.resolve(shell.trashItem(file)).catch((err) => {
+      console.error('[trash] 移入回收站失败，已跳过删除：', file, err && err.message);
+    });
+  } catch (err) {
+    console.error('[trash] 移入回收站异常，已跳过删除：', file, err && err.message);
+  }
+  return Promise.resolve();
 }
 
 function restoreCurrent() {
@@ -699,11 +719,7 @@ ipcMain.on('open-page', async (_e, p) => {
 ipcMain.handle('delete-page', async (_e, p) => {
   const file = safePagePath(p);
   if (!file || !fs.existsSync(file)) return { ok: false };
-  try {
-    fs.unlinkSync(file);
-  } catch {
-    return { ok: false };
-  }
+  await trashFile(file); // 走回收站，误删可恢复
   const st = loadState();
   const carets = { ...(st.carets || {}) };
   delete carets[file];
