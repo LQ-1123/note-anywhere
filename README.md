@@ -103,3 +103,7 @@ node tools/tag-audit.mjs        # 语法 tag 覆盖审计
 > 诊断段会优雅超时（`DIAG timeout`），不影响冒烟结论。
 
 > 注：呼出热键特意避开 Ctrl+Space（中文 Windows 的输入法中英切换键），输入法切换习惯不受影响。
+
+## 许可
+
+[MIT](LICENSE) © 2026 LQ-1123
