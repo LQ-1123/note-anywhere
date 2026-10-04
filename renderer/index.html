@@ -16,10 +16,6 @@
         <button id="new-btn" title="新建一页（Alt+N）">＋</button>
       </div>
       <div id="page-list"></div>
-      <div id="tag-box" hidden>
-        <div id="tag-head">标签</div>
-        <div id="tag-list"></div>
-      </div>
       <div id="side-foot">
         <button id="settings-btn" title="设置">⚙</button>
       </div>
@@ -58,6 +54,13 @@
     </div>
 
     <div id="editor"></div>
+
+    <!-- 正文下方的标签栏：只显示当前这篇的 #标签，点一下即按该标签搜索；无标签时整条隐藏 -->
+    <div id="tag-bar" hidden>
+      <span id="tag-bar-label">标签</span>
+      <span id="tag-bar-list"></span>
+    </div>
+
     <footer id="hint">
       <span>Alt+Q / Esc 收起并保存 · Alt+N 新建 · Alt+Del 删除本页</span>
       <span id="saved-at"></span>

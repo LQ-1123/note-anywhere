@@ -185,14 +185,37 @@ await check('Ctrl+K search finds across pages and jumps to the hit', async () =>
   assert.ok((snap.t.split('\n')[line - 1] || '').includes('nginx'), '光标未落在命中行: line=' + line);
 });
 
-await check('sidebar tags are collected from notes', async () => {
+await check('host tag scanner ignores colours, URL anchors and fences', async () => {
+  await newPage();
   await d.mouse('.cm-content');
-  await d.key('End', ['ctrl']);
-  await d.insertText('\n\n#测试标签 追加一行');
-  await sleep(1200);
-  await d.until('document.querySelectorAll(".tag-item").length > 0', '侧栏标签未出现', 6000);
-  const tags = await d.evaluate('JSON.stringify(Array.from(document.querySelectorAll(".tag-item .tag-name")).map(e => e.textContent))');
-  assert.ok(tags.includes('测试标签'), '标签列表: ' + tags);
+  await d.insertText('# 标签规则\n\n用了 #nginx 和 #待办；参考 https://x.com/#anchor 与颜色 #fff。\n\n```js\n// #notatag\n```\n');
+  await sleep(1300); // 等自动落盘，宿主的 listTags 扫的是磁盘
+  const tags = JSON.parse(
+    await d.evaluate('(async () => JSON.stringify(await window.__TAURI__.core.invoke("list_tags")))()')
+  ).tags.map((t) => t.tag);
+  assert.ok(tags.includes('nginx') && tags.includes('待办'), 'tags: ' + JSON.stringify(tags));
+  assert.ok(!tags.includes('anchor') && !tags.includes('fff') && !tags.includes('notatag'), 'false tags: ' + JSON.stringify(tags));
+});
+
+await check('tag bar under the note shows only this note tags and searches on click', async () => {
+  await d.until('document.getElementById("tag-bar").hidden === false', '标签栏未出现', 3000);
+  const chips = JSON.parse(
+    await d.evaluate('JSON.stringify(Array.from(document.querySelectorAll("#tag-bar .tag-chip")).map(e => e.dataset.tag))')
+  );
+  assert.deepEqual(chips, ['nginx', '待办'], 'chips: ' + JSON.stringify(chips));
+  assert.equal(
+    await d.evaluate('document.querySelectorAll("#tag-box, #tag-list").length'),
+    0,
+    '侧栏标签栏应该已经移除'
+  );
+
+  await d.mouse('#tag-bar .tag-chip');
+  await d.until('document.getElementById("search-input").value === "#nginx"', '点标签未按标签搜索', 3000);
+  await d.evaluate('document.getElementById("search-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
+
+  // 没有标签的页 → 整条隐藏，不占地方
+  await newPage();
+  assert.equal(await d.evaluate('document.getElementById("tag-bar").hidden'), true, '无标签时标签栏应隐藏');
 });
 
 // ---------- 每日回顾 ----------

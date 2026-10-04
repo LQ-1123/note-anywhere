@@ -450,7 +450,9 @@ app.whenReady().then(async () => {
       assert.ok(/^1\. abc\n2\. $/.test(text), 'Enter did not continue numbering: ' + JSON.stringify(text));
     });
     // ---------- 全文搜索 / #标签 ----------
-    await check('sidebar tags ignore colours, URL anchors and code fences', async () => {
+    // 标签栏显示在正文下方（只显示当前这篇），所以这里既验宿主扫描器（listTags），
+    // 也验渲染层的标签栏与点击搜索。
+    await check('host tag scanner ignores colours, URL anchors and code fences', async () => {
       const notesDir = path.join(app.getPath('userData'), 'notes');
       fs.mkdirSync(notesDir, { recursive: true });
       fs.writeFileSync(path.join(notesDir, '2026-10-01_10-00-00.md'), [
@@ -472,16 +474,33 @@ app.whenReady().then(async () => {
         '#读书笔记 今天读了关于 #nginx 的一章，讲负载均衡。',
       ].join('\n'), 'utf8');
 
-      // 标签扫描有 3 秒节流，先越过窗口再触发一次侧栏刷新
-      await delay(3200);
-      await read('window.bridge.newPage()');
-      await until('document.querySelectorAll(".tag-item").length > 0', 'tags did not appear in the sidebar', 4000);
-      const tags = await read('Array.from(document.querySelectorAll(".tag-item .tag-name")).map(e => e.textContent)');
+      const tags = JSON.parse(
+        await read('(async () => JSON.stringify(await window.bridge.listTags()))()')
+      ).tags.map((t) => t.tag);
       assert.ok(tags.includes('nginx') && tags.includes('待办') && tags.includes('读书笔记'), 'tags: ' + JSON.stringify(tags));
       assert.ok(
         !tags.includes('anchor') && !tags.includes('fff') && !tags.includes('notatag') && !tags.some((t) => t.includes('这是标题')),
         'false tags collected: ' + JSON.stringify(tags)
       );
+    });
+    await check('tag bar shows only this note tags, and a click searches that tag', async () => {
+      await mouse('#new-btn');
+      // 用 #示例标签 而不是 #待办：后者在别的用例里还有一篇，会干扰跨页搜索结果计数
+      await paste('# 标签示例\n\n今天用了 #nginx 和 #示例标签，颜色 #fff 与 https://x.com/#anchor 不算。\n\n```js\n// #notatag\n```\n');
+      await until('document.getElementById("tag-bar").hidden === false', 'tag bar did not appear', 3000);
+      const chips = await read('Array.from(document.querySelectorAll("#tag-bar .tag-chip")).map(e => e.dataset.tag)');
+      assert.deepEqual(chips, ['nginx', '示例标签'], 'chips: ' + JSON.stringify(chips));
+
+      await read('document.querySelector("#tag-bar .tag-chip").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))');
+      await until('document.getElementById("search-input").value === "#nginx"', 'chip click did not start a tag search');
+      await read('document.getElementById("search-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
+
+      // 没有标签的页 → 整条隐藏，不占地方
+      await mouse('#new-btn');
+      await paste('这一页没有标签\n');
+      await delay(600);
+      assert.equal(await read('document.getElementById("tag-bar").hidden'), true, 'tag bar should hide when the note has no tags');
+      assert.equal(await read('document.querySelectorAll("#tag-box, #tag-list").length'), 0, 'sidebar tag column should be gone');
     });
     await check('top bar hosts a persistent search box that does not swallow clicks', async () => {
       const info = await read('(() => { const b = document.getElementById("search-box"); const bar = document.getElementById("bar"); const r = b.getBoundingClientRect(); return { inBar: bar.contains(b), width: Math.round(r.width), rightAligned: Math.abs(bar.getBoundingClientRect().right - r.right) < 24 }; })()');
@@ -524,8 +543,12 @@ app.whenReady().then(async () => {
         'caret not on the matched line: caret=' + snap.c + ' line=' + line + ' head=' + JSON.stringify(snap.t.slice(0, 40))
       );
     });
-    await check('clicking a sidebar tag searches for that tag', async () => {
-      await read('(() => { const el = Array.from(document.querySelectorAll(".tag-item")).find(e => e.dataset.tag === "待办"); el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); return 1; })()');
+    await check('clicking a tag chip searches for that tag', async () => {
+      // 显式切到含 #待办 的那一页，顺带验证标签栏跟着页面走
+      await read(`(() => { const it = Array.from(document.querySelectorAll('.page-item')).find(e => e.dataset.path.endsWith('2026-10-01_10-00-00.md')); it.click(); return 1; })()`);
+      await until('document.getElementById("title").textContent === "架构笔记"', 'did not switch to the tagged page', 3000);
+      await until('document.getElementById("tag-bar").hidden === false', 'tag bar missing on the tagged page', 3000);
+      await read('(() => { const el = Array.from(document.querySelectorAll("#tag-bar .tag-chip")).find(e => e.dataset.tag === "待办"); el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); return 1; })()');
       await until('document.querySelectorAll(".sr-hit").length === 1', 'tag search returned unexpected hit count');
       assert.equal(await read('document.getElementById("search-input").value'), '#待办');
       assert.ok((await read('document.querySelector(".sr-hit .sr-text").textContent')).includes('#待办'), 'tag hit text wrong');

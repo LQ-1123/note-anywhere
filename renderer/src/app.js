@@ -1987,6 +1987,7 @@ const view = new EditorView({
           // 开始打字就收起回顾横幅：它是唤起记忆用的，不该挡着你写
           if (u.transactions.some((tr) => tr.isUserEvent('input') || tr.isUserEvent('delete'))) hideReview();
           renderTitle();
+          renderCurrentTags(); // 正文下方的标签栏：随文档即时更新
           clearTimeout(saveTimer);
           saveTimer = setTimeout(saveNow, 600);
         }
@@ -2612,7 +2613,6 @@ async function refreshList() {
   }
   currentFile = data.current;
   listEl.textContent = '';
-  refreshTagsThrottled(); // 顺带刷新侧栏标签（内部有 3 秒节流）
 
   if (!data.pages.length) {
     const tip = document.createElement('div');
@@ -2716,8 +2716,6 @@ const searchInput = document.getElementById('search-input');
 const searchListEl = document.getElementById('search-list');
 const searchCountEl = document.getElementById('search-count');
 const searchScopeEl = document.getElementById('search-scope');
-const tagBox = document.getElementById('tag-box');
-const tagListEl = document.getElementById('tag-list');
 
 const search = { open: false, items: [], selected: 0, query: '', timer: null, seq: 0 };
 
@@ -2926,55 +2924,72 @@ document.addEventListener(
   true
 );
 
-// 标签：扫全部笔记里的 #tag，列到侧栏；点一下就等于用该标签做搜索
-let lastTagScan = 0;
-let tagScanning = false;
+// 标签：只解析**当前这一篇**的 #tag，显示在正文下方；点一下就用该标签做跨页搜索。
+// 扫描规则必须与宿主（main.js / search.rs）一致：
+//   # 必须在行首或空白之后（URL 锚点不算）、纯十六进制 3/4/6/8 位按颜色值排除、围栏代码块内不算。
+const tagBar = document.getElementById('tag-bar');
+const tagBarList = document.getElementById('tag-bar-list');
 
-function refreshTagsThrottled() {
-  if (tagScanning || Date.now() - lastTagScan < 3000) return;
-  lastTagScan = Date.now();
-  tagScanning = true;
-  bridge
-    .listTags()
-    .then((res) => {
-      const tags = (res && res.ok && res.tags) || [];
-      renderTags(tags);
-    })
-    .catch(() => {})
-    .finally(() => {
-      tagScanning = false;
-    });
+const RE_TAG_START = /[\p{L}\p{N}_]/u;
+const RE_TAG_CHAR = /[\p{L}\p{N}_/-]/u;
+const RE_COLOR_TAG = /^[0-9a-fA-F]+$/;
+
+function scanTags(text) {
+  const tags = [];
+  const seen = new Set();
+  let inFence = false;
+  for (const line of String(text).split('\n')) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    let i = 0;
+    while (i < line.length) {
+      if (line[i] === '#') {
+        const boundary = i === 0 || /\s/.test(line[i - 1]);
+        if (boundary && i + 1 < line.length && RE_TAG_START.test(line[i + 1])) {
+          let j = i + 1;
+          while (j < line.length && RE_TAG_CHAR.test(line[j])) j++;
+          const tag = line.slice(i + 1, j);
+          const isColor = RE_COLOR_TAG.test(tag) && [3, 4, 6, 8].includes(tag.length);
+          if (!isColor && !seen.has(tag)) {
+            seen.add(tag);
+            tags.push(tag);
+          }
+          i = j;
+          continue;
+        }
+      }
+      i++;
+    }
+  }
+  return tags;
 }
 
-function renderTags(tags) {
+function renderCurrentTags() {
+  const tags = scanTags(view.state.doc.toString());
   if (!tags.length) {
-    tagBox.hidden = true;
-    tagListEl.textContent = '';
+    if (!tagBar.hidden) {
+      tagBar.hidden = true;
+      tagBarList.textContent = '';
+    }
     return;
   }
-  tagBox.hidden = false;
-  tagListEl.textContent = '';
-  for (const t of tags) {
-    const item = document.createElement('div');
-    item.className = 'tag-item';
-    item.dataset.tag = t.tag;
-    const hash = document.createElement('span');
-    hash.className = 'tag-hash';
-    hash.textContent = '#';
-    const name = document.createElement('span');
-    name.className = 'tag-name';
-    name.textContent = t.tag;
-    const count = document.createElement('span');
-    count.className = 'tag-count';
-    count.textContent = String(t.count);
-    item.appendChild(hash);
-    item.appendChild(name);
-    item.appendChild(count);
-    item.addEventListener('mousedown', (e) => {
+  tagBar.hidden = false;
+  tagBarList.textContent = '';
+  for (const tag of tags) {
+    const chip = document.createElement('button');
+    chip.className = 'tag-chip';
+    chip.type = 'button';
+    chip.dataset.tag = tag;
+    chip.title = '搜索 #' + tag;
+    chip.textContent = '#' + tag;
+    chip.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      openSearch('#' + t.tag);
+      openSearch('#' + tag);
     });
-    tagListEl.appendChild(item);
+    tagBarList.appendChild(chip);
   }
 }
 
