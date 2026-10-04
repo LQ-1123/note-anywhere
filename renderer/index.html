@@ -14,6 +14,10 @@
         <button id="new-btn" title="新建一页（Alt+N）">＋</button>
       </div>
       <div id="page-list"></div>
+      <div id="tag-box" hidden>
+        <div id="tag-head">标签</div>
+        <div id="tag-list"></div>
+      </div>
       <div id="side-foot">
         <button id="settings-btn" title="设置">⚙</button>
       </div>
@@ -114,6 +118,22 @@
             </div>
           </div>
         </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- 搜索 / 标签结果面板 -->
+  <div id="search-mask" hidden>
+    <div id="search-panel">
+      <div id="search-head">
+        <span id="search-icon">🔍</span>
+        <input id="search-input" type="text" placeholder="搜索全部笔记…（Ctrl+K）" autocomplete="off" spellcheck="false" />
+        <span id="search-count"></span>
+      </div>
+      <div id="search-list"></div>
+      <div id="search-foot">
+        <span><b>↑</b> <b>↓</b> 选择 · <b>Enter</b> 打开 · <b>Esc</b> 关闭</span>
+        <span id="search-scope"></span>
       </div>
     </div>
   </div>

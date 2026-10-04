@@ -698,3 +698,105 @@ ipcMain.handle('delete-page', async (_e, p) => {
   }
   return { ok: true };
 });
+
+// ---------- 全文搜索 / 标签 ----------
+
+// 笔记都是根目录下的小 md，直接读盘扫，不建索引（几百个文件毫秒级）
+function eachNote(fn) {
+  ensureNotesDir();
+  let entries = [];
+  try {
+    entries = fs.readdirSync(NOTES_DIR, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const d of entries) {
+    if (!d.isFile() || !d.name.toLowerCase().endsWith('.md')) continue;
+    const file = path.join(NOTES_DIR, d.name);
+    let text = '';
+    let mtime = 0;
+    try {
+      text = fs.readFileSync(file, 'utf8');
+      mtime = fs.statSync(file).mtimeMs;
+    } catch {
+      continue;
+    }
+    fn(file, text, mtime);
+  }
+}
+
+const MAX_HITS_PER_NOTE = 4;
+const MAX_RESULTS = 60;
+
+ipcMain.handle('search-notes', (_e, payload) => {
+  const query = typeof (payload && payload.query) === 'string' ? payload.query.trim() : '';
+  if (!query) return { ok: true, results: [] };
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const results = [];
+  eachNote((file, text, mtime) => {
+    if (results.length >= MAX_RESULTS) return;
+    const lines = text.split('\n');
+    const hits = [];
+    let offset = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const hay = line.toLowerCase();
+      if (terms.every((t) => hay.includes(t))) {
+        const col = Math.max(0, hay.indexOf(terms[0]));
+        hits.push({ line: i + 1, text: line.slice(0, 400), col, offset: offset + col });
+        if (hits.length >= MAX_HITS_PER_NOTE) break;
+      }
+      offset += line.length + 1;
+    }
+    if (hits.length) {
+      results.push({ file, title: pageTitle(file) || path.basename(file, '.md'), mtime, hits });
+    }
+  });
+  results.sort((a, b) => b.mtime - a.mtime);
+  return { ok: true, results: results.slice(0, MAX_RESULTS), query };
+});
+
+// #标签：只在「行首或空白之后」才算，避免命中 URL 锚点(https://x/#a)；
+// 纯十六进制且长度为 3/4/6/8 的（#fff / #ffffff / #333）按颜色值排除；
+// 围栏代码块内的 # 一律不算（多为注释或颜色）
+const TAG_RE = /(^|\s)#([\p{L}\p{N}_][\p{L}\p{N}_/-]*)/gu;
+const isColorTag = (tag) => /^[0-9a-fA-F]+$/.test(tag) && [3, 4, 6, 8].includes(tag.length);
+
+ipcMain.handle('list-tags', () => {
+  const counts = new Map();
+  eachNote((file, text) => {
+    let inFence = false;
+    for (const line of text.split('\n')) {
+      if (/^\s*```/.test(line)) {
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence) continue;
+      TAG_RE.lastIndex = 0;
+      let m;
+      while ((m = TAG_RE.exec(line))) {
+        const tag = m[2];
+        if (isColorTag(tag)) continue;
+        counts.set(tag, (counts.get(tag) || 0) + 1);
+      }
+    }
+  });
+  const tags = [...counts.entries()]
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+  return { ok: true, tags };
+});
+
+// 从搜索结果跳到具体位置：切页 + 把光标放到命中处（复用 restore 通道）
+ipcMain.handle('open-page-at', async (_e, payload) => {
+  const file = safePagePath(payload && payload.path);
+  if (!file || !fs.existsSync(file)) return { ok: false };
+  await flushEditor();
+  const text = fs.readFileSync(file, 'utf8');
+  const caret = Math.min(Math.max(0, (payload.offset | 0) || 0), text.length);
+  const st = loadState();
+  const carets = { ...(st.carets || {}), [file]: caret };
+  saveState({ ...st, file, caret, carets });
+  sendRestore(text, caret, file);
+  return { ok: true };
+});

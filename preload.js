@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld('bridge', {
   // 窗口真实可见性（渲染端 document.hidden 在未显示窗口里不可靠，会误报“可见”）
   onVisibility: (cb) => ipcRenderer.on('win-visibility', (_e, visible) => cb(visible)),
   listPages: () => ipcRenderer.invoke('list-pages'),
+  searchNotes: (query) => ipcRenderer.invoke('search-notes', { query }),
+  listTags: () => ipcRenderer.invoke('list-tags'),
+  openPageAt: (path, offset) => ipcRenderer.invoke('open-page-at', { path, offset }),
   openPage: (p) => ipcRenderer.send('open-page', p),
   deletePage: (p) => ipcRenderer.invoke('delete-page', p),
   getSettings: () => ipcRenderer.invoke('get-settings'),

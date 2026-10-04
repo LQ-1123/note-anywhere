@@ -2597,6 +2597,7 @@ async function refreshList() {
   }
   currentFile = data.current;
   listEl.textContent = '';
+  refreshTagsThrottled(); // 顺带刷新侧栏标签（内部有 3 秒节流）
 
   if (!data.pages.length) {
     const tip = document.createElement('div');
@@ -2693,6 +2694,265 @@ function flushAndSend() {
   saveNow();
 }
 
+// ---------- 全文搜索 / 标签 ----------
+
+const searchMask = document.getElementById('search-mask');
+const searchInput = document.getElementById('search-input');
+const searchListEl = document.getElementById('search-list');
+const searchCountEl = document.getElementById('search-count');
+const searchScopeEl = document.getElementById('search-scope');
+const tagBox = document.getElementById('tag-box');
+const tagListEl = document.getElementById('tag-list');
+
+const search = { open: false, items: [], selected: 0, query: '', timer: null, seq: 0 };
+
+function openSearch(initialQuery) {
+  if (typeof initialQuery === 'string') searchInput.value = initialQuery;
+  searchMask.hidden = false;
+  search.open = true;
+  searchInput.focus();
+  searchInput.select();
+  runSearch(searchInput.value);
+}
+
+function closeSearch() {
+  if (!search.open) return;
+  search.open = false;
+  searchMask.hidden = true;
+  search.items = [];
+  searchListEl.textContent = '';
+  searchCountEl.textContent = '';
+  searchScopeEl.textContent = '';
+  clearTimeout(search.timer);
+  ++search.seq;
+}
+
+function runSearch(query) {
+  const q = String(query || '').trim();
+  search.query = q;
+  searchScopeEl.textContent = q.startsWith('#') ? '标签：' + q : '';
+  clearTimeout(search.timer);
+  if (!q) {
+    search.items = [];
+    search.selected = 0;
+    searchCountEl.textContent = '';
+    renderSearchResults();
+    return;
+  }
+  const seq = ++search.seq;
+  search.timer = setTimeout(async () => {
+    let res = null;
+    try {
+      res = await bridge.searchNotes(q);
+    } catch {}
+    if (seq !== search.seq || !search.open) return; // 丢弃过期结果
+    search.items = [];
+    if (res && res.ok) {
+      for (const page of res.results) {
+        for (const hit of page.hits) {
+          search.items.push({
+            file: page.file,
+            title: page.title,
+            mtime: page.mtime,
+            line: hit.line,
+            text: hit.text,
+            offset: hit.offset,
+            term: q.split(/\s+/)[0],
+          });
+        }
+      }
+    }
+    search.selected = 0;
+    renderSearchResults();
+  }, 110);
+}
+
+// 命中行太长时只保留命中处前后一小段，并把关键词套上 <mark>
+function renderHitText(el, text, term) {
+  el.textContent = '';
+  const src = String(text || '');
+  const t = String(term || '');
+  const at = t ? src.toLowerCase().indexOf(t.toLowerCase()) : -1;
+  if (at < 0) {
+    el.textContent = src.slice(0, 160);
+    return;
+  }
+  const start = Math.max(0, at - 30);
+  const end = Math.min(src.length, at + t.length + 90);
+  el.appendChild(document.createTextNode((start > 0 ? '…' : '') + src.slice(start, at)));
+  const mark = document.createElement('mark');
+  mark.textContent = src.slice(at, at + t.length);
+  el.appendChild(mark);
+  el.appendChild(document.createTextNode(src.slice(at + t.length, end) + (end < src.length ? '…' : '')));
+}
+
+function renderSearchResults() {
+  searchListEl.textContent = '';
+  if (!search.query) {
+    const tip = document.createElement('div');
+    tip.id = 'search-empty';
+    tip.textContent = '输入关键词搜索全部笔记；空格分隔多个词，例如「nginx 超时」；点侧栏标签也可直接搜';
+    searchListEl.appendChild(tip);
+    return;
+  }
+  if (!search.items.length) {
+    const tip = document.createElement('div');
+    tip.id = 'search-empty';
+    tip.textContent = '没有找到匹配的笔记';
+    searchListEl.appendChild(tip);
+    searchCountEl.textContent = '';
+    return;
+  }
+  searchCountEl.textContent = search.items.length + ' 条';
+  search.items.forEach((it, i) => {
+    const row = document.createElement('div');
+    row.className = 'sr-hit' + (i === search.selected ? ' sel' : '');
+    const meta = document.createElement('div');
+    meta.className = 'sr-meta';
+    const title = document.createElement('span');
+    title.className = 'sr-title';
+    title.textContent = it.title || '(无标题)';
+    meta.appendChild(title);
+    const ln = document.createElement('span');
+    ln.className = 'sr-line';
+    ln.textContent = '第 ' + it.line + ' 行';
+    meta.appendChild(ln);
+    const date = document.createElement('span');
+    date.className = 'sr-date';
+    date.textContent = formatDate(it.mtime);
+    meta.appendChild(date);
+    row.appendChild(meta);
+    const text = document.createElement('div');
+    text.className = 'sr-text';
+    renderHitText(text, it.text, it.term);
+    row.appendChild(text);
+    row.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      openSearchHit(i);
+    });
+    searchListEl.appendChild(row);
+  });
+  const sel = searchListEl.children[search.selected];
+  if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: 'nearest' });
+}
+
+function moveSearchSelection(dir) {
+  if (!search.items.length) return;
+  search.selected = (search.selected + dir + search.items.length) % search.items.length;
+  const rows = searchListEl.querySelectorAll('.sr-hit');
+  rows.forEach((r, i) => r.classList.toggle('sel', i === search.selected));
+  const sel = rows[search.selected];
+  if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: 'nearest' });
+}
+
+async function openSearchHit(i) {
+  const it = search.items[i];
+  if (!it) return;
+  closeSearch();
+  try {
+    await bridge.openPageAt(it.file, it.offset); // 切页 + 光标定位到命中处
+  } catch {}
+}
+
+searchInput.addEventListener('input', () => runSearch(searchInput.value));
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    moveSearchSelection(1);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    moveSearchSelection(-1);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    openSearchHit(search.selected);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeSearch();
+    view.focus();
+  }
+  e.stopPropagation(); // 别让编辑器/全局处理器再抢这些键
+});
+searchMask.addEventListener('mousedown', (e) => {
+  if (e.target === searchMask) {
+    closeSearch();
+    view.focus();
+  }
+});
+
+// Ctrl+K 打开搜索（全局捕获，编辑器没焦点时也能用）
+document.addEventListener(
+  'keydown',
+  (event) => {
+    if (event.isComposing || event.keyCode === 229 || hotkeyListening) return;
+    if (
+      event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey &&
+      (event.key === 'k' || event.key === 'K')
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (search.open) {
+        searchInput.focus();
+        searchInput.select();
+      } else {
+        openSearch(searchInput.value || '');
+      }
+    }
+  },
+  true
+);
+
+// 标签：扫全部笔记里的 #tag，列到侧栏；点一下就等于用该标签做搜索
+let lastTagScan = 0;
+let tagScanning = false;
+
+function refreshTagsThrottled() {
+  if (tagScanning || Date.now() - lastTagScan < 3000) return;
+  lastTagScan = Date.now();
+  tagScanning = true;
+  bridge
+    .listTags()
+    .then((res) => {
+      const tags = (res && res.ok && res.tags) || [];
+      renderTags(tags);
+    })
+    .catch(() => {})
+    .finally(() => {
+      tagScanning = false;
+    });
+}
+
+function renderTags(tags) {
+  if (!tags.length) {
+    tagBox.hidden = true;
+    tagListEl.textContent = '';
+    return;
+  }
+  tagBox.hidden = false;
+  tagListEl.textContent = '';
+  for (const t of tags) {
+    const item = document.createElement('div');
+    item.className = 'tag-item';
+    item.dataset.tag = t.tag;
+    const hash = document.createElement('span');
+    hash.className = 'tag-hash';
+    hash.textContent = '#';
+    const name = document.createElement('span');
+    name.className = 'tag-name';
+    name.textContent = t.tag;
+    const count = document.createElement('span');
+    count.className = 'tag-count';
+    count.textContent = String(t.count);
+    item.appendChild(hash);
+    item.appendChild(name);
+    item.appendChild(count);
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      openSearch('#' + t.tag);
+    });
+    tagListEl.appendChild(item);
+  }
+}
+
 // ---------- 恢复页面（呼出/切换/新建） ----------
 
 bridge.onRestore(({ text, caret, file }) => {
@@ -2701,6 +2961,7 @@ bridge.onRestore(({ text, caret, file }) => {
   clearTimeout(saveTimer);
   closeModal();
   closeSettings();
+  closeSearch();
   const changedPage = currentFile !== (file || null);
   if (changedPage) {
     tableColumnWidths = new Map();

@@ -449,6 +449,72 @@ app.whenReady().then(async () => {
       const text = (await snapshot()).t;
       assert.ok(/^1\. abc\n2\. $/.test(text), 'Enter did not continue numbering: ' + JSON.stringify(text));
     });
+    // ---------- 全文搜索 / #标签 ----------
+    await check('sidebar tags ignore colours, URL anchors and code fences', async () => {
+      const notesDir = path.join(app.getPath('userData'), 'notes');
+      fs.mkdirSync(notesDir, { recursive: true });
+      fs.writeFileSync(path.join(notesDir, '2026-10-01_10-00-00.md'), [
+        '# 架构笔记',
+        '',
+        '今天试了下 #nginx 的 proxy_pass，发现超时问题。',
+        '参考 https://example.com/page#anchor 和颜色 #fff',
+        '# 这是标题不是标签',
+        '',
+        '```js',
+        '// #notatag 在代码块里',
+        '```',
+        '',
+        '#待办 明天确认 upstream 超时',
+      ].join('\n'), 'utf8');
+      fs.writeFileSync(path.join(notesDir, '2026-10-02_11-00-00.md'), [
+        '# 读书笔记',
+        '',
+        '#读书笔记 今天读了关于 #nginx 的一章，讲负载均衡。',
+      ].join('\n'), 'utf8');
+
+      // 标签扫描有 3 秒节流，先越过窗口再触发一次侧栏刷新
+      await delay(3200);
+      await read('window.bridge.newPage()');
+      await until('document.querySelectorAll(".tag-item").length > 0', 'tags did not appear in the sidebar', 4000);
+      const tags = await read('Array.from(document.querySelectorAll(".tag-item .tag-name")).map(e => e.textContent)');
+      assert.ok(tags.includes('nginx') && tags.includes('待办') && tags.includes('读书笔记'), 'tags: ' + JSON.stringify(tags));
+      assert.ok(
+        !tags.includes('anchor') && !tags.includes('fff') && !tags.includes('notatag') && !tags.some((t) => t.includes('这是标题')),
+        'false tags collected: ' + JSON.stringify(tags)
+      );
+    });
+    await check('Ctrl+K search finds across pages and jumps to the hit', async () => {
+      await key('K', ['control']);
+      await until('document.getElementById("search-mask").hidden === false', 'search panel did not open');
+      assert.equal(await read('document.activeElement.id'), 'search-input', 'search input not focused');
+      await read('(() => { const i = document.getElementById("search-input"); i.value = "nginx"; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()');
+      await until('document.querySelectorAll(".sr-hit").length >= 2', 'search returned no hits');
+      assert.ok(await read('document.querySelectorAll(".sr-hit mark").length >= 2'), 'matches not highlighted');
+      const titles = await read('Array.from(document.querySelectorAll(".sr-hit .sr-title")).map(e => e.textContent)');
+      assert.ok(titles.includes('架构笔记') && titles.includes('读书笔记'), 'cross-page titles: ' + JSON.stringify(titles));
+
+      await read('document.getElementById("search-input").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }))');
+      await delay(150);
+      await read('document.getElementById("search-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }))');
+      await until('document.getElementById("search-mask").hidden === true', 'search panel did not close after Enter');
+      await delay(500);
+      const snap = await snapshot();
+      const line = snap.t.slice(0, snap.c).split('\n').length;
+      assert.ok(
+        (snap.t.split('\n')[line - 1] || '').toLowerCase().includes('nginx'),
+        'caret not on the matched line: caret=' + snap.c + ' line=' + line + ' head=' + JSON.stringify(snap.t.slice(0, 40))
+      );
+    });
+    await check('clicking a sidebar tag searches for that tag', async () => {
+      await key('K', ['control']);
+      await until('document.getElementById("search-mask").hidden === false', 'search panel did not reopen');
+      await read('(() => { const el = Array.from(document.querySelectorAll(".tag-item")).find(e => e.dataset.tag === "待办"); el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); return 1; })()');
+      await until('document.querySelectorAll(".sr-hit").length === 1', 'tag search returned unexpected hit count');
+      assert.equal(await read('document.getElementById("search-input").value'), '#待办');
+      assert.ok((await read('document.querySelector(".sr-hit .sr-text").textContent')).includes('#待办'), 'tag hit text wrong');
+      await read('document.getElementById("search-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
+      await until('document.getElementById("search-mask").hidden === true', 'Esc did not close search');
+    });
     console.log('TABLE-OK');
     try { if (originalClipboard) require('electron').clipboard.writeText(originalClipboard); else require('electron').clipboard.clear(); } catch {}
     clearTimeout(watchdog);
