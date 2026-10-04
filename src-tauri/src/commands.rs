@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_opener::OpenerExt;
 
 pub(crate) fn settings_payload(app: &AppHandle, state: &AppState) -> Value {
@@ -404,6 +405,37 @@ pub fn frontend_ready(app: AppHandle, state: State<'_, AppState>) -> Value {
         window::show(&app, &state);
     }
     json!({ "ok": true })
+}
+
+/// 供外部（CDP 测试 / 调试）校验宿主能力：无边框置顶卡、托盘、全局热键都得能验证
+#[tauri::command]
+pub fn debug_window(app: AppHandle, state: State<'_, AppState>) -> Value {
+    let Some(win) = app.get_webview_window(window::MAIN) else {
+        return json!({ "ok": false });
+    };
+    let size = win
+        .outer_size()
+        .map(|s| json!({ "w": s.width, "h": s.height }))
+        .unwrap_or(Value::Null);
+    let hotkey = state.store.lock().unwrap().setting_str("hotkey");
+    let shortcut: Option<tauri_plugin_global_shortcut::Shortcut> = hotkey.parse().ok();
+    let hotkey_registered = shortcut
+        .map(|s| app.global_shortcut().is_registered(s))
+        .unwrap_or(false);
+    json!({
+        "ok": true,
+        "decorations": win.is_decorated().unwrap_or(true),
+        "alwaysOnTop": win.is_always_on_top().unwrap_or(false),
+        "visible": win.is_visible().unwrap_or(false),
+        "focused": win.is_focused().unwrap_or(false),
+        "resizable": win.is_resizable().unwrap_or(true),
+        "size": size,
+        "theme": format!("{:?}", win.theme()),
+        "tray": app.tray_by_id(window::TRAY_ID).is_some(),
+        "hotkey": hotkey,
+        "hotkeyRegistered": hotkey_registered,
+        "singleInstance": true
+    })
 }
 
 /// 供外部（CDP 测试 / 调试）读取：当前设置与状态文件路径

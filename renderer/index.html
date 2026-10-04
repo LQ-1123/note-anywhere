@@ -2,7 +2,9 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data: blob: https: http:" />
+  <!-- connect-src 带上 ipc: / http://ipc.localhost：Tauri 的自定义协议 IPC 需要它，
+       否则会退回 postMessage 慢通道（Electron 下这两个源不存在，无副作用） -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' file: data: blob: https: http:" />
   <title>NoteAnywhere</title>
   <link rel="stylesheet" href="style.css" />
 </head>

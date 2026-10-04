@@ -56,6 +56,7 @@ fn main() {
             commands::save_image,
             commands::save_clipboard_image,
             commands::debug_paths,
+            commands::debug_window,
             commands::frontend_ready,
         ])
         .setup(|app| {
