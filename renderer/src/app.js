@@ -2706,47 +2706,53 @@ const tagListEl = document.getElementById('tag-list');
 
 const search = { open: false, items: [], selected: 0, query: '', timer: null, seq: 0 };
 
+function showSearchResults() {
+  search.open = true;
+  searchMask.hidden = false;
+}
+
+// 只收起结果下拉，不动输入框的焦点/内容
+function hideSearchResults() {
+  search.open = false;
+  searchMask.hidden = true;
+  search.items = [];
+  search.selected = 0;
+  searchListEl.textContent = '';
+  searchCountEl.textContent = '';
+  searchScopeEl.textContent = '';
+  clearTimeout(search.timer);
+  ++search.seq;
+}
+
 function openSearch(initialQuery) {
   if (typeof initialQuery === 'string') searchInput.value = initialQuery;
-  searchMask.hidden = false;
-  search.open = true;
   searchInput.focus();
   searchInput.select();
   runSearch(searchInput.value);
 }
 
 function closeSearch() {
-  if (!search.open) return;
-  search.open = false;
-  searchMask.hidden = true;
-  search.items = [];
-  searchListEl.textContent = '';
-  searchCountEl.textContent = '';
-  searchScopeEl.textContent = '';
-  clearTimeout(search.timer);
-  ++search.seq;
+  hideSearchResults();
   if (document.activeElement === searchInput) searchInput.blur();
 }
 
 function runSearch(query) {
   const q = String(query || '').trim();
   search.query = q;
-  searchScopeEl.textContent = q.startsWith('#') ? '标签：' + q : '';
   clearTimeout(search.timer);
+  // 没输入内容就不展开下拉，避免弹出一个空框
   if (!q) {
-    search.items = [];
-    search.selected = 0;
-    searchCountEl.textContent = '';
-    renderSearchResults();
+    hideSearchResults();
     return;
   }
+  searchScopeEl.textContent = q.startsWith('#') ? '标签：' + q : '';
   const seq = ++search.seq;
   search.timer = setTimeout(async () => {
     let res = null;
     try {
       res = await bridge.searchNotes(q);
     } catch {}
-    if (seq !== search.seq || !search.open) return; // 丢弃过期结果
+    if (seq !== search.seq) return; // 丢弃过期结果
     search.items = [];
     if (res && res.ok) {
       for (const page of res.results) {
@@ -2764,6 +2770,7 @@ function runSearch(query) {
       }
     }
     search.selected = 0;
+    showSearchResults();
     renderSearchResults();
   }, 110);
 }
@@ -2789,13 +2796,6 @@ function renderHitText(el, text, term) {
 
 function renderSearchResults() {
   searchListEl.textContent = '';
-  if (!search.query) {
-    const tip = document.createElement('div');
-    tip.id = 'search-empty';
-    tip.textContent = '输入关键词搜索全部笔记；空格分隔多个词，例如「nginx 超时」；点侧栏标签也可直接搜';
-    searchListEl.appendChild(tip);
-    return;
-  }
   if (!search.items.length) {
     const tip = document.createElement('div');
     tip.id = 'search-empty';
@@ -2856,9 +2856,9 @@ async function openSearchHit(i) {
 }
 
 searchInput.addEventListener('input', () => runSearch(searchInput.value));
-// 顶栏搜索框是常驻的：点进去/聚焦就展开结果下拉
+// 顶栏搜索框是常驻的：里面已有内容时，重新聚焦就把上次的结果再展开
 searchInput.addEventListener('focus', () => {
-  if (!search.open) openSearch(searchInput.value);
+  if (searchInput.value.trim()) runSearch(searchInput.value);
 });
 searchInput.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown') {
@@ -2884,7 +2884,7 @@ document.addEventListener(
     if (!search.open) return;
     const t = e.target;
     if (t && t.closest && (t.closest('#search-panel') || t.closest('#search-box'))) return;
-    closeSearch();
+    hideSearchResults();
   },
   true
 );

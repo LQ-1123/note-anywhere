@@ -487,7 +487,13 @@ app.whenReady().then(async () => {
       const info = await read('(() => { const b = document.getElementById("search-box"); const bar = document.getElementById("bar"); const r = b.getBoundingClientRect(); return { inBar: bar.contains(b), width: Math.round(r.width), rightAligned: Math.abs(bar.getBoundingClientRect().right - r.right) < 24 }; })()');
       assert.ok(info.inBar && info.width > 40 && info.rightAligned, 'search box not in top-right of the bar: ' + JSON.stringify(info));
       await read('document.getElementById("search-input").focus()');
-      await until('document.getElementById("search-mask").hidden === false', 'dropdown did not open when the box was focused');
+      assert.equal(
+        await read('document.getElementById("search-mask").hidden'),
+        true,
+        'an empty query must not open the dropdown'
+      );
+      await read('(() => { const i = document.getElementById("search-input"); i.value = "nginx"; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()');
+      await until('document.getElementById("search-mask").hidden === false', 'dropdown did not open after typing');
       await mouse('.cm-content');
       await delay(350);
       assert.equal(await read('document.getElementById("search-mask").hidden'), true, 'clicking the editor did not close the dropdown');
@@ -498,8 +504,8 @@ app.whenReady().then(async () => {
     });
     await check('Ctrl+K search finds across pages and jumps to the hit', async () => {
       await key('K', ['control']);
-      await until('document.getElementById("search-mask").hidden === false', 'search panel did not open');
-      assert.equal(await read('document.activeElement.id'), 'search-input', 'search input not focused');
+      await delay(220);
+      assert.equal(await read('document.activeElement.id'), 'search-input', 'Ctrl+K did not focus the search box');
       await read('(() => { const i = document.getElementById("search-input"); i.value = "nginx"; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()');
       await until('document.querySelectorAll(".sr-hit").length >= 2', 'search returned no hits');
       assert.ok(await read('document.querySelectorAll(".sr-hit mark").length >= 2'), 'matches not highlighted');
@@ -519,8 +525,6 @@ app.whenReady().then(async () => {
       );
     });
     await check('clicking a sidebar tag searches for that tag', async () => {
-      await key('K', ['control']);
-      await until('document.getElementById("search-mask").hidden === false', 'search panel did not reopen');
       await read('(() => { const el = Array.from(document.querySelectorAll(".tag-item")).find(e => e.dataset.tag === "待办"); el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); return 1; })()');
       await until('document.querySelectorAll(".sr-hit").length === 1', 'tag search returned unexpected hit count');
       assert.equal(await read('document.getElementById("search-input").value'), '#待办');
