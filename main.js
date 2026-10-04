@@ -5,6 +5,7 @@ const {
   Tray,
   Menu,
   nativeImage,
+  clipboard,
   ipcMain,
   dialog,
   shell,
@@ -596,6 +597,74 @@ ipcMain.handle('open-link', async (_e, raw) => {
   if (!fs.existsSync(abs)) return { ok: false, error: '文件不存在' };
   const failure = await shell.openPath(abs);
   return failure ? { ok: false, error: failure } : { ok: true };
+});
+
+// ---------- 粘贴图片 ----------
+
+// 只按白名单决定扩展名，绝不拿剪贴板给的 MIME 去拼路径
+const IMAGE_EXT = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/bmp': 'bmp',
+};
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+
+// 落到「笔记目录/assets/时间戳.ext」，返回相对笔记的路径，让笔记自包含、可整体搬走
+function saveImageBuffer(buf, mime) {
+  const ext = IMAGE_EXT[String(mime || '').toLowerCase()];
+  if (!ext) return { ok: false, error: '不支持的图片格式' };
+  if (!buf || !buf.length) return { ok: false, error: '没有图片数据' };
+  if (buf.length > MAX_IMAGE_BYTES) return { ok: false, error: '图片过大（上限 25MB）' };
+  const dir = path.join(NOTES_DIR, 'assets');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    return { ok: false, error: '无法创建 assets 目录' };
+  }
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+  let name = `${stamp}.${ext}`;
+  let i = 2;
+  while (fs.existsSync(path.join(dir, name))) name = `${stamp}-${i++}.${ext}`;
+  const file = path.join(dir, name);
+  try {
+    fs.writeFileSync(file, buf);
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+  return { ok: true, rel: 'assets/' + name, file };
+}
+
+ipcMain.handle('save-image', (_e, payload) => {
+  const bytes = payload && payload.bytes;
+  let buf;
+  try {
+    buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
+  } catch {
+    return { ok: false, error: '图片数据无法读取' };
+  }
+  return saveImageBuffer(buf, payload && payload.mime);
+});
+
+// 兜底：渲染端拿不到剪贴板字节时（例如从资源管理器复制的图片），直接读系统剪贴板。
+// 注意 Electron 44 的剪贴板是异步 ClipboardItem 接口，没有 readImage()/readBuffer()。
+ipcMain.handle('save-clipboard-image', async () => {
+  try {
+    const items = await clipboard.read();
+    for (const item of items || []) {
+      const type = (item.types || []).find((t) => IMAGE_EXT[String(t).toLowerCase()]);
+      if (!type) continue;
+      const blob = await item.getType(type);
+      const res = saveImageBuffer(Buffer.from(await blob.arrayBuffer()), type);
+      if (res.ok) return res;
+    }
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+  return { ok: false, error: '剪贴板里没有图片' };
 });
 
 ipcMain.handle('list-pages', () => listPages());

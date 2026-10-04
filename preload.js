@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('bridge', {
   resetWindow: () => ipcRenderer.invoke('reset-window'),
   openPath: (p) => ipcRenderer.invoke('open-path', p),
   openLink: (url) => ipcRenderer.invoke('open-link', url),
+  saveImage: (bytes, mime) => ipcRenderer.invoke('save-image', { bytes, mime }),
+  saveClipboardImage: () => ipcRenderer.invoke('save-clipboard-image'),
   save: (text, caret) => ipcRenderer.send('save', { text, caret }),
   hide: () => ipcRenderer.send('hide'),
   newPage: () => ipcRenderer.send('new-page'),

@@ -918,16 +918,27 @@ function fileUrlOf(absPath) {
   return 'file://' + encodeURI(p).replace(/[?#]/g, (c) => '%' + c.charCodeAt(0).toString(16));
 }
 
+// 笔记目录缓存：新页还没落盘时 currentFile 为空，相对路径要退回按它解析
+let notesDirCache = '';
+function refreshNotesDir() {
+  bridge.getSettings().then((s) => {
+    if (s && s.notesDir) notesDirCache = String(s.notesDir);
+  }).catch(() => {});
+}
+refreshNotesDir();
+
 // 网络地址原样用；本地绝对路径直接转 file://；相对路径按当前笔记所在目录解析
 function resolveImageSrc(src) {
   const s = String(src || '').trim();
   if (!s) return '';
   if (/^(https?|data|blob|file):/i.test(s)) return s;
   if (/^[a-zA-Z]:[\\/]/.test(s) || s.startsWith('\\\\')) return fileUrlOf(s);
+  if (s.startsWith('/')) return fileUrlOf(s);
   const file = String(currentFile || '').replace(/\\/g, '/');
   const cut = file.lastIndexOf('/');
-  if (cut === -1 || s.startsWith('/')) return fileUrlOf(s);
-  return fileUrlOf(file.slice(0, cut) + '/' + s);
+  const base = cut !== -1 ? file.slice(0, cut) : String(notesDirCache || '').replace(/\\/g, '/');
+  if (!base) return fileUrlOf(s);
+  return fileUrlOf(base + '/' + s);
 }
 
 class ImageWidget extends WidgetType {
@@ -958,6 +969,78 @@ class ImageWidget extends WidgetType {
     return box;
   }
   ignoreEvent() { return false; } // 点一下把光标放进该节点 → 直接看到 ![]() 源码去修改
+}
+
+// ---------- 粘贴图片（Ctrl+V 截图 / 复制的位图） ----------
+
+let imageErrorTimer = null;
+
+function imageFromClipboard(cd) {
+  if (!cd) return null;
+  const found = [];
+  if (cd.items) {
+    for (const item of cd.items) {
+      if (item.kind === 'file' && /^image\//i.test(item.type || '')) {
+        const file = item.getAsFile();
+        if (file) found.push(file);
+      }
+    }
+  }
+  if (!found.length && cd.files) {
+    for (const file of cd.files) {
+      if (/^image\//i.test(file.type || '')) found.push(file);
+    }
+  }
+  return found[0] || null;
+}
+
+// 图片独占一段：光标所在行前后还有内容时各补一个空行；
+// 末尾始终留一个换行并把光标放到图片节点之外，粘完立刻就是渲染态
+function insertImageMarkdown(rel) {
+  const sel = view.state.selection.main;
+  const line = view.state.doc.lineAt(sel.from);
+  const before = line.text.slice(0, sel.from - line.from).trim();
+  const after = line.text.slice(sel.to - line.from).trim();
+  const md = '![图片](' + rel + ')';
+  const lead = before ? '\n\n' : '';
+  const tail = after ? '\n\n' : '\n';
+  view.dispatch({
+    changes: { from: sel.from, to: sel.to, insert: lead + md + tail },
+    selection: { anchor: sel.from + lead.length + md.length + 1 },
+    scrollIntoView: true,
+    userEvent: 'input.paste',
+  });
+  view.focus();
+}
+
+function flashImageError(message) {
+  savedAt.textContent = message;
+  savedAt.classList.add('show');
+  clearTimeout(imageErrorTimer);
+  imageErrorTimer = setTimeout(() => savedAt.classList.remove('show'), 2600);
+}
+
+// 优先用粘贴事件里的字节；拿不到就退回让主进程读系统剪贴板位图
+async function insertPastedImage(file) {
+  let bytes = null;
+  try {
+    bytes = new Uint8Array(await file.arrayBuffer());
+  } catch {
+    bytes = null;
+  }
+  let res = null;
+  try {
+    if (bytes && bytes.length) res = await bridge.saveImage(bytes, file.type || 'image/png');
+    if (!res || !res.ok) res = await bridge.saveClipboardImage();
+  } catch (err) {
+    res = { ok: false, error: String((err && err.message) || err) };
+  }
+  if (!res || !res.ok) {
+    flashImageError('图片保存失败' + (res && res.error ? '：' + res.error : ''));
+    return;
+  }
+  insertImageMarkdown(res.rel);
+  saveNow(); // 顺手落盘，新页也会因此拿到文件
 }
 
 function buildMdDecos(view) {
@@ -1738,6 +1821,13 @@ const view = new EditorView({
       Prec.high(EditorView.domEventHandlers({
         // 粘贴代码：无围栏的裸代码自动包上带语言的围栏；带围栏但无语言的自动补标签
         paste(event) {
+          // 剪贴板里是图片（截图等）→ 先落盘再插入 ![]()，其余粘贴逻辑不受影响
+          const image = imageFromClipboard(event.clipboardData);
+          if (image) {
+            event.preventDefault();
+            void insertPastedImage(image);
+            return true;
+          }
           const text = event.clipboardData && event.clipboardData.getData('text/plain');
           if (!text) return false;
           if (text.indexOf('```') !== -1) {
@@ -2117,6 +2207,7 @@ document.getElementById('set-font-plus').addEventListener('click', () => {
 document.getElementById('set-notesdir-change').addEventListener('click', async () => {
   const r = await bridge.pickNotesDir();
   if (r && r.ok) {
+    notesDirCache = String(r.dir || ''); // 相对图片路径的解析基准随之更新
     document.getElementById('set-notesdir').textContent = r.dir;
     refreshList();
   }
@@ -2502,6 +2593,7 @@ function renderTitle() {
 }
 
 function flashSaved() {
+  clearTimeout(imageErrorTimer);
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
   savedAt.textContent = '已保存 ' + p(d.getHours()) + ':' + p(d.getMinutes());
