@@ -483,6 +483,19 @@ app.whenReady().then(async () => {
         'false tags collected: ' + JSON.stringify(tags)
       );
     });
+    await check('top bar hosts a persistent search box that does not swallow clicks', async () => {
+      const info = await read('(() => { const b = document.getElementById("search-box"); const bar = document.getElementById("bar"); const r = b.getBoundingClientRect(); return { inBar: bar.contains(b), width: Math.round(r.width), rightAligned: Math.abs(bar.getBoundingClientRect().right - r.right) < 24 }; })()');
+      assert.ok(info.inBar && info.width > 40 && info.rightAligned, 'search box not in top-right of the bar: ' + JSON.stringify(info));
+      await read('document.getElementById("search-input").focus()');
+      await until('document.getElementById("search-mask").hidden === false', 'dropdown did not open when the box was focused');
+      await mouse('.cm-content');
+      await delay(350);
+      assert.equal(await read('document.getElementById("search-mask").hidden'), true, 'clicking the editor did not close the dropdown');
+      assert.ok(
+        String(await read('document.activeElement.className')).includes('cm-content'),
+        'the dropdown swallowed the click instead of passing it to the editor'
+      );
+    });
     await check('Ctrl+K search finds across pages and jumps to the hit', async () => {
       await key('K', ['control']);
       await until('document.getElementById("search-mask").hidden === false', 'search panel did not open');

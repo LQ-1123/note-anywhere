@@ -2725,6 +2725,7 @@ function closeSearch() {
   searchScopeEl.textContent = '';
   clearTimeout(search.timer);
   ++search.seq;
+  if (document.activeElement === searchInput) searchInput.blur();
 }
 
 function runSearch(query) {
@@ -2855,6 +2856,10 @@ async function openSearchHit(i) {
 }
 
 searchInput.addEventListener('input', () => runSearch(searchInput.value));
+// 顶栏搜索框是常驻的：点进去/聚焦就展开结果下拉
+searchInput.addEventListener('focus', () => {
+  if (!search.open) openSearch(searchInput.value);
+});
 searchInput.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown') {
     e.preventDefault();
@@ -2872,12 +2877,17 @@ searchInput.addEventListener('keydown', (e) => {
   }
   e.stopPropagation(); // 别让编辑器/全局处理器再抢这些键
 });
-searchMask.addEventListener('mousedown', (e) => {
-  if (e.target === searchMask) {
+// 点别处收起下拉（下拉层不吃点击，编辑器/侧栏该收到的点击照常收到）
+document.addEventListener(
+  'mousedown',
+  (e) => {
+    if (!search.open) return;
+    const t = e.target;
+    if (t && t.closest && (t.closest('#search-panel') || t.closest('#search-box'))) return;
     closeSearch();
-    view.focus();
-  }
-});
+  },
+  true
+);
 
 // Ctrl+K 打开搜索（全局捕获，编辑器没焦点时也能用）
 document.addEventListener(

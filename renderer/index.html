@@ -24,6 +24,10 @@
     </aside>
     <header id="bar">
       <div id="title">新的一页</div>
+      <div id="search-box">
+        <span id="search-box-icon">🔍</span>
+        <input id="search-input" type="text" placeholder="搜索笔记" autocomplete="off" spellcheck="false" />
+      </div>
     </header>
     <div id="editor"></div>
     <footer id="hint">
@@ -122,18 +126,13 @@
     </div>
   </div>
 
-  <!-- 搜索 / 标签结果面板 -->
+  <!-- 搜索 / 标签结果：从右上角搜索框下方展开 -->
   <div id="search-mask" hidden>
     <div id="search-panel">
-      <div id="search-head">
-        <span id="search-icon">🔍</span>
-        <input id="search-input" type="text" placeholder="搜索全部笔记…（Ctrl+K）" autocomplete="off" spellcheck="false" />
-        <span id="search-count"></span>
-      </div>
       <div id="search-list"></div>
       <div id="search-foot">
         <span><b>↑</b> <b>↓</b> 选择 · <b>Enter</b> 打开 · <b>Esc</b> 关闭</span>
-        <span id="search-scope"></span>
+        <span id="search-meta"><span id="search-scope"></span><span id="search-count"></span></span>
       </div>
     </div>
   </div>

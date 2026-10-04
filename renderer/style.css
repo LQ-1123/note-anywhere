@@ -247,6 +247,9 @@ body {
   background: var(--bg);
   border-bottom: 1px solid var(--hairline);
   min-width: 0;
+  /* 高于搜索结果的点击捕获层，保证搜索框在结果展开时仍可点/可输入 */
+  position: relative;
+  z-index: 61;
 }
 
 #title {
@@ -1308,18 +1311,22 @@ body.theme-light .cm-highlight {
   color: var(--faint);
 }
 
-/* ---------- 搜索 / 标签结果面板 ---------- */
+/* ---------- 顶栏搜索框 + 结果下拉 ---------- */
 
+/* 结果下拉的定位层：不吃点击（pointer-events: none），点侧栏/编辑区仍然生效 */
 #search-mask {
   position: fixed;
-  inset: 0;
-  z-index: 80;
-  background: rgba(0, 0, 0, 0.32);
+  left: 0;
+  right: 0;
+  top: 46px;
+  bottom: 0;
+  z-index: 60;
+  background: transparent;
+  pointer-events: none;
   display: flex;
   align-items: flex-start;
-  justify-content: center;
-  padding-top: 8vh;
-  animation: modal-fade 0.1s ease-out;
+  justify-content: flex-end;
+  padding: 6px 16px 0 0;
 }
 
 #search-mask[hidden] {
@@ -1327,8 +1334,9 @@ body.theme-light .cm-highlight {
 }
 
 #search-panel {
-  width: min(640px, 94%);
-  max-height: 72vh;
+  width: min(560px, 74vw);
+  max-height: 62vh;
+  pointer-events: auto;
   display: flex;
   flex-direction: column;
   background: var(--side);
@@ -1339,31 +1347,51 @@ body.theme-light .cm-highlight {
   animation: modal-in 0.12s ease-out;
 }
 
-#search-head {
+/* 顶栏里的常驻搜索框 */
+#search-box {
+  -webkit-app-region: no-drag;
   flex: none;
+  margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 13px 16px;
-  border-bottom: 1px solid var(--hairline);
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--hover);
+  transition: border-color 0.12s, background 0.12s;
 }
 
-#search-icon {
+#search-box:hover {
+  border-color: var(--hairline);
+}
+
+#search-box:focus-within {
+  border-color: var(--accent);
+  background: var(--bg);
+}
+
+#search-box-icon {
   flex: none;
-  font-size: 13px;
-  opacity: 0.75;
+  font-size: 11px;
+  opacity: 0.7;
 }
 
 #search-input {
-  flex: 1;
+  width: 132px;
   min-width: 0;
   appearance: none;
   border: none;
   outline: none;
   background: transparent;
   color: var(--text);
-  font-size: 14px;
+  font-size: 12px;
   font-family: inherit;
+}
+
+#search-input::placeholder {
+  color: var(--faint);
 }
 
 #search-count {
@@ -1461,6 +1489,14 @@ body.theme-light .cm-highlight {
   color: var(--muted);
   font-weight: 600;
   font-family: Consolas, monospace;
+}
+
+#search-meta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 #search-scope {
